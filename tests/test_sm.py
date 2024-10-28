@@ -76,14 +76,14 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_send_spawn_request(self):
         """Test the send_spawn_request helper function."""
         test_cmd = sys.executable
-        test_args = ["-c", "print('Test')"]
+        test_args = ["-u", "-c", "print('Test')"]
         test_env = {}
 
         response = await send_spawn_request(
             test_cmd, test_args, test_env, port=self.port
         )
         self.assertEqual(response.get("code"), "success")
-        pid = response.get("subproc_pid")
+        pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
@@ -98,7 +98,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         sleep_args = ["-c", "import time; time.sleep(5)"]
         response = await send_spawn_request(sleep_cmd, sleep_args, {}, port=self.port)
         self.assertEqual(response.get("code"), "success")
-        pid = response.get("subproc_pid")
+        pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
@@ -119,10 +119,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
         # Spawn a subprocess
         test_cmd = sys.executable
-        test_args = ["-c", "print('Hello')"]
+        test_args = ["-u", "-c", "print('Hello')"]
         response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
         self.assertEqual(response.get("code"), "success")
-        pid = response.get("subproc_pid")
+        pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
@@ -148,10 +148,10 @@ for i in range(3):
 
         # Spawn the subprocess
         test_cmd = sys.executable
-        test_args = ["-c", script]
+        test_args = ["-u", "-c", script]
         response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
         self.assertEqual(response.get("code"), "success")
-        pid = response.get("subproc_pid")
+        pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 

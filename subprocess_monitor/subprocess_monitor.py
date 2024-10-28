@@ -30,11 +30,14 @@ class StopProcessRequest(TypedDict):
 async def check_processes_step():
     print(PROCESS_OWNERSHIP)
     for pid, process in list(PROCESS_OWNERSHIP.items()):
-        if (
-            psutil.pid_exists(pid)
-            and psutil.Process(pid).status() == psutil.STATUS_RUNNING
-        ):
-            continue
+        try:
+            if (
+                psutil.pid_exists(pid)
+                and psutil.Process(pid).status() == psutil.STATUS_RUNNING
+            ):
+                continue
+        except psutil.NoSuchProcess:
+            pass
 
         logger.info(f"Process {pid} is not running ({process.returncode})")
         await stop_subprocess(process, pid)
@@ -60,7 +63,7 @@ async def run_subprocess_monitor(port: int = 5057, check_interval: float = 2):
         # to avoid thread safety issues as the web framework used here is not mandatory
         try:
             subprocess_pid = await start_subprocess(request, port)
-            return web.json_response({"code": "success", "subproc_pid": subprocess_pid})
+            return web.json_response({"code": "success", "pid": subprocess_pid})
         except Exception as exc:
             cmd = " ".join([request["cmd"], *request["args"]])
             logger.error(f"Failed to start subprocess: {cmd}")
