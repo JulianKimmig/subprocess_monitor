@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest import IsolatedAsyncioTestCase
 import logging
-
+import textwrap
 import aiohttp
 import psutil
 
@@ -138,14 +138,16 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_subscribe(self):
         """Test the subscribe helper function."""
         # Define a script that outputs multiple lines with delays
-        script = """
+        script = textwrap.dedent(
+            """
 import time
 time.sleep(0.5)
 for i in range(10):
-    print(f"Line {i}",flush=True)
+    print(f"Line {i}", flush=True)
     time.sleep(0.1)
 time.sleep(0.5)
 """
+        ).strip()
 
         # Spawn the subprocess
         test_cmd = sys.executable
