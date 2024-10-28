@@ -1,66 +1,18 @@
 import argparse
 import asyncio
-import json
 import logging
-import os
-from aiohttp import ClientSession, WSMsgType
-from subprocess_monitor import run_subprocess_monitor
+
+from subprocess_monitor import (
+    run_subprocess_monitor,
+    send_spawn_request,
+    send_stop_request,
+    get_status,
+    subscribe,
+)
+
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-
-async def send_spawn_request(command, args, env, port):
-    req = {
-        "cmd": command,
-        "args": args,
-        "env": env,
-        "pid": None,
-    }
-    async with ClientSession() as session:
-        async with session.post(f"http://localhost:{port}/spawn", json=req) as resp:
-            response = await resp.json()
-            logger.info(f"Response from server: {json.dumps(response, indent=2)}")
-            return response
-
-
-async def send_stop_request(pid, port):
-    req = {
-        "pid": pid,
-    }
-    async with ClientSession() as session:
-        async with session.post(f"http://localhost:{port}/stop", json=req) as resp:
-            response = await resp.json()
-            logger.info(f"Response from server: {json.dumps(response, indent=2)}")
-            return response
-
-
-async def get_status(port):
-    async with ClientSession() as session:
-        async with session.get(f"http://localhost:{port}/") as resp:
-            response = await resp.json()
-            logger.info(f"Current subprocess status: {json.dumps(response, indent=2)}")
-            return response
-
-
-async def subscribe(pid: int, port: int):
-    url = f"http://localhost:{port}/subscribe?pid={pid}"
-    print(f"Subscribing to output for process with PID {pid}...")
-
-    async with ClientSession() as session:
-        async with session.ws_connect(url) as ws:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    # Print received message (process output)
-                    data = json.loads(msg.data)
-                    print(
-                        f"[{data['stream'].upper()}] PID {data['pid']}: {data['data']}"
-                    )
-                elif msg.type == WSMsgType.ERROR:
-                    print(f"Error in WebSocket connection: {ws.exception()}")
-                    break
-
-            print(f"WebSocket connection for PID {pid} closed.")
 
 
 def main():

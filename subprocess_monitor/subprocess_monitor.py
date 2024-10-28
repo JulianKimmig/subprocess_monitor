@@ -7,7 +7,7 @@ import os
 import json
 from asyncio.subprocess import Process
 import psutil
-import platform
+
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,8 @@ async def subscribe_output(request: web.Request):
                 )
     finally:
         async with SUBSCRIPTIONS_LOCK:
-            SUBSCRIPTIONS[pid].remove(ws)
+            if pid in SUBSCRIPTIONS and ws in SUBSCRIPTIONS[pid]:
+                SUBSCRIPTIONS[pid].remove(ws)
         logger.info(f"Client unsubscribed from subprocess {pid} output.")
 
     return ws
