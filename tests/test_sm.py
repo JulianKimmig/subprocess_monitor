@@ -174,6 +174,8 @@ time.sleep(0.5)
                         raise Exception(
                             f"WebSocket connection closed with error: {ws.exception()}"
                         )
+                    else:
+                        raise Exception(f"Unexpected message type: {msg}")
                     # Exit after receiving expected messages
                     if len(messages) >= 3:
                         break
