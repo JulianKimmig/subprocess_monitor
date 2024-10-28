@@ -141,7 +141,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         script = """
 import time
 time.sleep(0.5)
-for i in range(3):
+for i in range(10):
     print(f"Line {i}",flush=True)
     time.sleep(0.1)
 time.sleep(0.5)
@@ -171,7 +171,9 @@ time.sleep(0.5)
                         data = json.loads(msg.data)
                         messages.append(data)
                     elif msg.type == aiohttp.WSMsgType.ERROR:
-                        break
+                        raise Exception(
+                            f"WebSocket connection closed with error: {ws.exception()}"
+                        )
                     # Exit after receiving expected messages
                     if len(messages) >= 3:
                         break
