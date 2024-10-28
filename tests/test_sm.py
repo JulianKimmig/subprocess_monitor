@@ -142,8 +142,9 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 import time
 time.sleep(0.5)
 for i in range(3):
-    print(f"Line {i}")
+    print(f"Line {i}",flush=True)
     time.sleep(0.1)
+time.sleep(0.5)
 """
 
         # Spawn the subprocess
