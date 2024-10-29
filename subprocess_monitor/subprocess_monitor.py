@@ -302,6 +302,7 @@ async def start_subprocess(request: SpawnProcessRequest, port: int):
     full_command = [cmd] + args
 
     env["SUBPROCESS_MONITOR_PORT"] = str(port)
+    env["SUBPROCESS_MONITOR_PID"] = str(os.getpid())
 
     env = {**os.environ, **env}
 
@@ -310,7 +311,6 @@ async def start_subprocess(request: SpawnProcessRequest, port: int):
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        # stdin=asyncio.subprocess.PIPE,
     )
 
     async with PROCESS_OWNERSHIP_LOCK:
