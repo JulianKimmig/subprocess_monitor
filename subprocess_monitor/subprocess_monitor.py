@@ -7,6 +7,7 @@ import os
 import json
 from asyncio.subprocess import Process
 import psutil
+from .defaults import DEFAULT_PORT, DEFAULT_HOST
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,6 @@ class StopProcessRequest(TypedDict):
 
 
 async def check_processes_step():
-    print(PROCESS_OWNERSHIP)
     for pid, process in list(PROCESS_OWNERSHIP.items()):
         try:
             if (
@@ -50,7 +50,9 @@ async def check_processes_step():
                 del SUBSCRIPTIONS[pid]
 
 
-async def run_subprocess_monitor(port: int = 5057, check_interval: float = 2):
+async def run_subprocess_monitor(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, check_interval: float = 2
+):
     check_interval = max(0.1, check_interval)  # Ensure period is not too small
     app = web.Application()
 
@@ -87,7 +89,7 @@ async def run_subprocess_monitor(port: int = 5057, check_interval: float = 2):
         try:
             logger.info(f"Starting subprocess manager on port {port}...")
             await runner.setup()
-            site = web.TCPSite(runner, "localhost", port)
+            site = web.TCPSite(runner, host, port)
             await site.start()
 
             while True:
@@ -138,7 +140,11 @@ async def subscribe_output(request: web.Request):
 
 
 def remote_spawn_subprocess(
-    command: str, args: list[str], env: dict[str, str], port: int = 5687
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+    host=DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
 ):
     """
     sends a spwan request to the service
@@ -154,7 +160,7 @@ def remote_spawn_subprocess(
         logger.info(f"Sending request to spawn subprocess: {json.dumps(req, indent=2)}")
         async with ClientSession() as session:
             async with session.post(
-                f"http://localhost:{port}/spawn",
+                f"http://{host}:{port}/spawn",
                 json=req,
             ) as resp:
                 ans = await resp.json()
