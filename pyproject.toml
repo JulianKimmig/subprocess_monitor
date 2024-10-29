@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "subprocess-monitor"
-version = "0.1.0"
+version = "0.1.1"
 description = "A service to manage monitor and spawn subprocess"
 authors = ["JulianKimmig <julian.kimmig@gmx.net>"]
 license = "MIT"

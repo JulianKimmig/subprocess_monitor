@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import logging
-
+from .defaults import DEFAULT_HOST, DEFAULT_PORT
 from subprocess_monitor import (
     run_subprocess_monitor,
     send_spawn_request,
@@ -26,8 +26,19 @@ def main():
         "start", help="Start the subprocess manager server."
     )
     parser_start.add_argument(
-        "--port", type=int, default=5057, help="Port to run the subprocess manager on."
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to run the subprocess manager on.",
     )
+
+    parser_start.add_argument(
+        "--host",
+        type=str,
+        default=DEFAULT_HOST,
+        help="Host address of the subprocess manager",
+    )
+
     parser_start.add_argument(
         "--check_interval",
         type=float,
@@ -48,20 +59,50 @@ def main():
         help="Environment variables for the command (key=value format).",
     )
     parser_spawn.add_argument(
-        "--port", type=int, default=5057, help="Port to communicate with the server."
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to communicate with the server.",
+    )
+
+    parser_spawn.add_argument(
+        "--host",
+        type=str,
+        default=DEFAULT_HOST,
+        help="Host adress to communicate with the server.",
     )
 
     # Command to stop a subprocess
     parser_stop = subparsers.add_parser("stop", help="Stop a subprocess.")
     parser_stop.add_argument("pid", type=int, help="Process ID.")
     parser_stop.add_argument(
-        "--port", type=int, default=5057, help="Port to communicate with the server."
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to communicate with the server.",
+    )
+
+    parser_stop.add_argument(
+        "--host",
+        type=str,
+        default=DEFAULT_HOST,
+        help="Host adress to communicate with the server.",
     )
 
     # Command to check status of subprocesses
     parser_status = subparsers.add_parser("status", help="Check subprocess status.")
     parser_status.add_argument(
-        "--port", type=int, default=5057, help="Port to communicate with the server."
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to communicate with the server.",
+    )
+
+    parser_status.add_argument(
+        "--host",
+        type=str,
+        default=DEFAULT_HOST,
+        help="Host adress to communicate with the server.",
     )
 
     # Command to subscribe to a topic
@@ -70,12 +111,21 @@ def main():
     )
     parser_subscribe.add_argument("pid", type=int, help="Parent process ID.")
     parser_subscribe.add_argument(
-        "--port", type=int, default=5057, help="Port to communicate with the server."
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to communicate with the server.",
+    )
+
+    parser_subscribe.add_argument(
+        "--host",
+        type=str,
+        default=DEFAULT_HOST,
+        help="Host adress to communicate with the server.",
     )
 
     args = parser.parse_args()
 
-    print(args)
     if args.command == "start":
         asyncio.run(
             run_subprocess_monitor(port=args.port, check_interval=args.check_interval)
