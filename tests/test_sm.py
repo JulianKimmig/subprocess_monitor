@@ -145,6 +145,76 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
 
+    async def test_spawn_external_manager(self):
+        time.sleep(1)
+        port = find_free_port()
+
+        p1 = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "subprocess_monitor",
+                "start",
+                "--port",
+                str(port),
+                "--host",
+                self.host,
+            ]
+        )
+        time.sleep(1)
+
+        self.assertIsNone(p1.returncode)
+
+        status = await get_status(port=port, host=self.host)
+        self.assertIsInstance(status, list)
+        p1.kill()
+
+    async def test_call_spawn_external_process(self):
+        time.sleep(1)
+        port = find_free_port()
+
+        p1 = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "subprocess_monitor",
+                "start",
+                "--port",
+                str(port),
+                "--host",
+                self.host,
+            ]
+        )
+        time.sleep(1)
+
+        self.assertIsNone(p1.returncode)
+
+        status = await get_status(port=port, host=self.host)
+        self.assertIsInstance(status, list)
+
+        self.assertIsNone(p1.returncode)
+
+        resp = await send_spawn_request(
+            sys.executable,
+            ["-c", "import time; time.sleep(1)"],
+            port=port,
+            host=self.host,
+        )
+        self.assertIn("pid", resp, resp)
+
+        status = await get_status(port=port, host=self.host)
+        self.assertIsInstance(status, list)
+        self.assertEqual(len(status), 1)
+
+        p2 = psutil.Process(status[0])
+
+        self.assertTrue(p2.is_running())
+
+        p1.kill()
+
+        rc = p2.wait()
+        self.assertEqual(rc, 0)
+
     async def test_call_on_manager_death(self):
         time.sleep(1)
         port = find_free_port()
