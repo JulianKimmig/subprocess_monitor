@@ -156,6 +156,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         if os.name in ["posix"]:
             add_kwargs["start_new_session"] = True
 
+        print("spwarning with:", add_kwargs)
         p1 = subprocess.Popen(
             [
                 sys.executable,
