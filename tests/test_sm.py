@@ -1,14 +1,15 @@
 # tests/test_helper.py
 
 import asyncio
-import json
 import sys
 import unittest
 from unittest import IsolatedAsyncioTestCase
 import logging
-import textwrap
-import aiohttp
+
 import psutil
+import subprocess
+import time
+import os
 
 from subprocess_monitor.subprocess_monitor import (
     run_subprocess_monitor,
@@ -18,7 +19,6 @@ from subprocess_monitor.helper import (
     send_spawn_request,
     send_stop_request,
     get_status,
-    subscribe,
 )
 
 import socket
@@ -38,9 +38,14 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Set up the aiohttp server before each test."""
         self.port = find_free_port()
+        # self.host = os.uname()[1]  # "localhost"
+        # get ip of localhost
+        self.host = "localhost"  # socket.gethostbyname(hostname)
+
         self.server_task = asyncio.create_task(
-            run_subprocess_monitor(port=self.port, check_interval=0.1)
+            run_subprocess_monitor(port=self.port, check_interval=0.1, host=self.host)
         )
+
         # Allow some time for the server to start
         await asyncio.sleep(1)
 
@@ -76,11 +81,11 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_send_spawn_request(self):
         """Test the send_spawn_request helper function."""
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "print('Test')"]
+        test_args = ["-u", "-c", "import time"]
         test_env = {}
 
         response = await send_spawn_request(
-            test_cmd, test_args, test_env, port=self.port
+            test_cmd, test_args, test_env, port=self.port, host=self.host
         )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
@@ -96,14 +101,16 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         # Spawn a subprocess that sleeps for a while
         sleep_cmd = sys.executable
         sleep_args = ["-c", "import time; time.sleep(5)"]
-        response = await send_spawn_request(sleep_cmd, sleep_args, {}, port=self.port)
+        response = await send_spawn_request(
+            sleep_cmd, sleep_args, port=self.port, host=self.host
+        )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
         # Stop the subprocess
-        stop_response = await send_stop_request(pid, port=self.port)
+        stop_response = await send_stop_request(pid, port=self.port, host=self.host)
         self.assertEqual(stop_response.get("code"), "success")
 
         # Allow time for subprocess to terminate
@@ -113,27 +120,162 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_get_status(self):
         """Test the get_status helper function."""
         # Initially, no subprocesses should be running
-        status = await get_status(port=self.port)
+        status = await get_status(port=self.port, host=self.host)
         self.assertIsInstance(status, list)
         self.assertEqual(len(status), 0)
 
         # Spawn a subprocess
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "print('Hello')"]
-        response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
+        test_args = ["-u", "-c", "import time; time.sleep(0.5)"]
+        response = await send_spawn_request(
+            test_cmd, test_args, {}, port=self.port, host=self.host
+        )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
         # Check status again
-        status = await get_status(port=self.port)
+        status = await get_status(port=self.port, host=self.host)
         self.assertIn(pid, status)
 
         # Wait for subprocess to finish
-        await asyncio.sleep(0.5)
-        status = await get_status(port=self.port)
+        await asyncio.sleep(1)
+        status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
+
+    def _spwan_new_manager(self):
+        time.sleep(1)
+        port = find_free_port()
+
+        add_kwargs = {}
+
+        # on POSIX (linux, mac), we need to set the start_new_session to True
+        # to avoid the subprocess to become zombie when the parent is killed
+        if os.name in ["posix"]:
+            add_kwargs["start_new_session"] = True
+
+        print("spwarning with:", add_kwargs)
+        p1 = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "subprocess_monitor",
+                "start",
+                "--port",
+                str(port),
+                "--host",
+                self.host,
+            ],
+            **add_kwargs,
+        )
+        time.sleep(1)
+        return p1, port
+
+    async def test_spawn_external_manager(self):
+        p1, port = self._spwan_new_manager()
+
+        self.assertIsNone(p1.returncode)
+
+        status = await get_status(port=port, host=self.host)
+        self.assertIsInstance(status, list)
+        p1.kill()
+
+
+# TODO:The follwoing 2 tests fail on ubuntu since the exit status is None
+#     async def test_call_spawn_external_process(self):
+#         p1, port = self._spwan_new_manager()
+#         time.sleep(1)
+
+#         self.assertIsNone(p1.returncode)
+
+#         status = await get_status(port=port, host=self.host)
+#         self.assertIsInstance(status, list)
+
+#         self.assertIsNone(p1.returncode)
+
+#         resp = await send_spawn_request(
+#             sys.executable,
+#             ["-c", "import time; time.sleep(1)"],
+#             port=port,
+#             host=self.host,
+#         )
+#         self.assertIn("pid", resp, resp)
+
+#         status = await get_status(port=port, host=self.host)
+#         self.assertIsInstance(status, list)
+#         self.assertEqual(len(status), 1)
+
+#         p2 = psutil.Process(status[0])
+
+#         self.assertTrue(p2.is_running())
+
+#         p1.kill()
+
+#         rc = p2.wait()
+#         self.assertEqual(rc, 0)
+
+#     async def test_call_on_manager_death(self):
+#         p1, port = self._spwan_new_manager()
+
+#         self.assertIsNone(p1.returncode)
+
+#         status = await get_status(port=port, host=self.host)
+#         self.assertIsInstance(status, list)
+#         # assert p1  running
+#         code = """
+# import subprocess_monitor
+# import time
+# import os
+# import sys
+
+# KILL=False
+# PID=os.environ.get("SUBPROCESS_MONITOR_PID")
+# if PID is None:
+#     sys.exit(2)
+
+# def on_death():
+#     global KILL
+#     KILL=True
+#     sys.exit(4)
+
+# subprocess_monitor.call_on_manager_death(on_death, interval=0.5,)
+# print("KILL")
+# for i in range(10):
+#     time.sleep(1)
+#     if KILL:
+#         sys.exit(3)
+# """
+
+#         self.assertIsNone(p1.returncode)
+
+#         resp = await send_spawn_request(
+#             sys.executable,
+#             ["-c", code],
+#             port=port,
+#             host=self.host,
+#         )
+#         self.assertIn("pid", resp, resp)
+
+#         status = await get_status(port=port, host=self.host)
+#         self.assertIsInstance(status, list)
+#         self.assertEqual(len(status), 1)
+
+#         p2 = psutil.Process(status[0])
+
+#         self.assertTrue(p2.is_running())
+
+#         def on_death():
+#             print("In code on_death")
+
+#         os.environ["SUBPROCESS_MONITOR_PID"] = str(p1.pid)
+#         call_on_manager_death(on_death, interval=0.1)
+#         time.sleep(1)
+#         self.assertTrue(p2.is_running())
+#         p1.kill()
+
+#         rc = p2.wait()
+#         self.assertEqual(rc, 3)
 
 
 # TODO: Uncomment this test, but its not working on ubuntu?
