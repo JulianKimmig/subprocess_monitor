@@ -41,7 +41,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.port = find_free_port()
         # self.host = os.uname()[1]  # "localhost"
         # get ip of localhost
-        self.host = "127.0.0.1"  # socket.gethostbyname(hostname)
+        self.host = "localhost"  # socket.gethostbyname(hostname)
 
         self.server_task = asyncio.create_task(
             run_subprocess_monitor(port=self.port, check_interval=0.1, host=self.host)
