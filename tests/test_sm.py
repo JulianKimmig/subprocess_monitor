@@ -145,9 +145,16 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
 
-    async def test_spawn_external_manager(self):
+    def _spwan_new_manager(self):
         time.sleep(1)
         port = find_free_port()
+
+        add_kwargs = {}
+
+        # on POSIX (linux, mac), we need to set the start_new_session to True
+        # to avoid the subprocess to become zombie when the parent is killed
+        if os.name in ["posix"]:
+            add_kwargs["start_new_session"] = True
 
         p1 = subprocess.Popen(
             [
@@ -159,9 +166,14 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
                 str(port),
                 "--host",
                 self.host,
-            ]
+            ],
+            **add_kwargs,
         )
         time.sleep(1)
+        return p1, port
+
+    async def test_spawn_external_manager(self):
+        p1, port = self._spwan_new_manager()
 
         self.assertIsNone(p1.returncode)
 
@@ -170,21 +182,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         p1.kill()
 
     async def test_call_spawn_external_process(self):
-        time.sleep(1)
-        port = find_free_port()
-
-        p1 = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "subprocess_monitor",
-                "start",
-                "--port",
-                str(port),
-                "--host",
-                self.host,
-            ]
-        )
+        p1, port = self._spwan_new_manager()
         time.sleep(1)
 
         self.assertIsNone(p1.returncode)
@@ -216,22 +214,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertEqual(rc, 0)
 
     async def test_call_on_manager_death(self):
-        time.sleep(1)
-        port = find_free_port()
-
-        p1 = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "subprocess_monitor",
-                "start",
-                "--port",
-                str(port),
-                "--host",
-                self.host,
-            ]
-        )
-        time.sleep(1)
+        p1, port = self._spwan_new_manager()
 
         self.assertIsNone(p1.returncode)
 
