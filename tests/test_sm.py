@@ -146,6 +146,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertNotIn(pid, status)
 
     async def test_call_on_manager_death(self):
+        time.sleep(1)
         port = find_free_port()
 
         p1 = subprocess.Popen(
@@ -160,7 +161,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
                 self.host,
             ]
         )
+        time.sleep(1)
+
         self.assertIsNone(p1.returncode)
+
         status = await get_status(port=port, host=self.host)
         self.assertIsInstance(status, list)
         # assert p1  running
