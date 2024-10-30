@@ -82,7 +82,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_send_spawn_request(self):
         """Test the send_spawn_request helper function."""
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "import time; time.sleep(10)"]
+        test_args = ["-u", "-c", "import time"]
         test_env = {}
 
         response = await send_spawn_request(
@@ -127,7 +127,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
         # Spawn a subprocess
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "import time; time.sleep(5)"]
+        test_args = ["-u", "-c", "import time; time.sleep(0.5)"]
         response = await send_spawn_request(
             test_cmd, test_args, {}, port=self.port, host=self.host
         )
@@ -141,7 +141,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertIn(pid, status)
 
         # Wait for subprocess to finish
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
         status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
 
