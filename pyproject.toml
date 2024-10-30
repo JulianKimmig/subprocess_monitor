@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "subprocess-monitor"
-version = "0.1.1"
+version = "0.1.2"
 description = "A service to manage monitor and spawn subprocess"
 authors = ["JulianKimmig <julian.kimmig@gmx.net>"]
 license = "MIT"
@@ -11,9 +11,14 @@ python = ">=3.9"
 aiohttp = "*"
 psutil = "*"
 
-
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"
+pre-commit = "^4.0.1"
+
+
+[tool.vulture]
+min_confidence = 80
+paths = ["subprocess_monitor"]
 
 [build-system]
 requires = ["poetry-core"]
