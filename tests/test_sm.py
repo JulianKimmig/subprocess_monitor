@@ -9,7 +9,7 @@ import logging
 import psutil
 import subprocess
 import time
-
+import os
 
 from subprocess_monitor.subprocess_monitor import (
     run_subprocess_monitor,
@@ -39,9 +39,14 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Set up the aiohttp server before each test."""
         self.port = find_free_port()
+        # self.host = os.uname()[1]  # "localhost"
+        # get ip of localhost
+        self.host = "127.0.0.1"  # socket.gethostbyname(hostname)
+
         self.server_task = asyncio.create_task(
-            run_subprocess_monitor(port=self.port, check_interval=0.1)
+            run_subprocess_monitor(port=self.port, check_interval=0.1, host=self.host)
         )
+
         # Allow some time for the server to start
         await asyncio.sleep(1)
 
@@ -81,7 +86,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         test_env = {}
 
         response = await send_spawn_request(
-            test_cmd, test_args, test_env, port=self.port
+            test_cmd, test_args, test_env, port=self.port, host=self.host
         )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
@@ -97,14 +102,16 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         # Spawn a subprocess that sleeps for a while
         sleep_cmd = sys.executable
         sleep_args = ["-c", "import time; time.sleep(5)"]
-        response = await send_spawn_request(sleep_cmd, sleep_args, {}, port=self.port)
+        response = await send_spawn_request(
+            sleep_cmd, sleep_args, port=self.port, host=self.host
+        )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
         # Stop the subprocess
-        stop_response = await send_stop_request(pid, port=self.port)
+        stop_response = await send_stop_request(pid, port=self.port, host=self.host)
         self.assertEqual(stop_response.get("code"), "success")
 
         # Allow time for subprocess to terminate
@@ -114,36 +121,47 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_get_status(self):
         """Test the get_status helper function."""
         # Initially, no subprocesses should be running
-        status = await get_status(port=self.port)
+        status = await get_status(port=self.port, host=self.host)
         self.assertIsInstance(status, list)
         self.assertEqual(len(status), 0)
 
         # Spawn a subprocess
         test_cmd = sys.executable
         test_args = ["-u", "-c", "print('Hello')"]
-        response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
+        response = await send_spawn_request(
+            test_cmd, test_args, {}, port=self.port, host=self.host
+        )
         self.assertEqual(response.get("code"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
         self.assertIn(pid, PROCESS_OWNERSHIP)
 
         # Check status again
-        status = await get_status(port=self.port)
+        status = await get_status(port=self.port, host=self.host)
         self.assertIn(pid, status)
 
         # Wait for subprocess to finish
         await asyncio.sleep(0.5)
-        status = await get_status(port=self.port)
+        status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
 
     async def test_call_on_manager_death(self):
         port = find_free_port()
 
         p1 = subprocess.Popen(
-            [sys.executable, "-m", "subprocess_monitor", "start", "--port", str(port)]
+            [
+                sys.executable,
+                "-m",
+                "subprocess_monitor",
+                "start",
+                "--port",
+                str(port),
+                "--host",
+                self.host,
+            ]
         )
         self.assertIsNone(p1.returncode)
-        status = await get_status(port=port)
+        status = await get_status(port=port, host=self.host)
         self.assertIsInstance(status, list)
         # assert p1  running
         code = """
@@ -162,7 +180,7 @@ def on_death():
     KILL=True
     sys.exit(4)
 
-subprocess_monitor.call_on_manager_death(on_death, interval=0.5)
+subprocess_monitor.call_on_manager_death(on_death, interval=0.5,)
 print("KILL")
 for i in range(10):
     time.sleep(1)
@@ -172,10 +190,15 @@ for i in range(10):
 
         self.assertIsNone(p1.returncode)
 
-        resp = await send_spawn_request(sys.executable, ["-c", code], port=port)
+        resp = await send_spawn_request(
+            sys.executable,
+            ["-c", code],
+            port=port,
+            host=self.host,
+        )
         self.assertIn("pid", resp, resp)
 
-        status = await get_status(port=port)
+        status = await get_status(port=port, host=self.host)
         self.assertIsInstance(status, list)
         self.assertEqual(len(status), 1)
 
@@ -185,8 +208,6 @@ for i in range(10):
 
         def on_death():
             print("In code on_death")
-
-        import os
 
         os.environ["SUBPROCESS_MONITOR_PID"] = str(p1.pid)
         call_on_manager_death(on_death, interval=0.1)

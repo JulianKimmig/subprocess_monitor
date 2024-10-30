@@ -87,7 +87,7 @@ async def run_subprocess_monitor(
         runner = web.AppRunner(app)
 
         try:
-            logger.info(f"Starting subprocess manager on port {port}...")
+            logger.info(f"Starting subprocess manager on {host}:{port}...")
             await runner.setup()
             site = web.TCPSite(runner, host, port)
             await site.start()
