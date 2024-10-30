@@ -216,6 +216,7 @@ for i in range(10):
         os.environ["SUBPROCESS_MONITOR_PID"] = str(p1.pid)
         call_on_manager_death(on_death, interval=0.1)
         time.sleep(1)
+        self.assertTrue(p2.is_running())
         p1.kill()
 
         rc = p2.wait()
