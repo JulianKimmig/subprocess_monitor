@@ -115,10 +115,6 @@ async def run_subprocess_monitor(
             except Exception:
                 pass
 
-        for pid, subs in SUBSCRIPTIONS.items():
-            for sub in subs:
-                sub.close()
-
 
 async def subscribe_output(request: web.Request):
     pid = int(request.query.get("pid", -1))

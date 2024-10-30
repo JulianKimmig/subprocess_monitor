@@ -88,7 +88,7 @@ async def subscribe(
             print(f"WebSocket connection for PID {pid} closed.")
 
 
-def call_on_manager_death(callback, manager_pid=None, intervall=10):
+def call_on_manager_death(callback, manager_pid=None, interval=10):
     if manager_pid is None:
         manager_pid = os.environ.get("SUBPROCESS_MONITOR_PID")
 
@@ -97,11 +97,18 @@ def call_on_manager_death(callback, manager_pid=None, intervall=10):
             "manager_pid is not given and cannot be found as env:SUBPROCESS_MONITOR_PID"
         )
 
+    manager_pid = int(manager_pid)
+
     def call_on_death():
         while True:
             if not psutil.pid_exists(manager_pid):
                 callback()
                 break
-            time.sleep(intervall)
+            time.sleep(interval)
 
-    threading.Thread(call_on_death, daemon=True).start()
+    p = threading.Thread(target=call_on_death, daemon=True)
+    p.start()
+    time.sleep(0.1)
+    # check if p is running
+    if not p.is_alive():
+        raise ValueError("Thread is not running")

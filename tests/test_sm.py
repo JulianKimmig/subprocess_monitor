@@ -1,14 +1,15 @@
 # tests/test_helper.py
 
 import asyncio
-import json
 import sys
 import unittest
 from unittest import IsolatedAsyncioTestCase
 import logging
-import textwrap
-import aiohttp
+
 import psutil
+import subprocess
+import time
+
 
 from subprocess_monitor.subprocess_monitor import (
     run_subprocess_monitor,
@@ -18,7 +19,7 @@ from subprocess_monitor.helper import (
     send_spawn_request,
     send_stop_request,
     get_status,
-    subscribe,
+    call_on_manager_death,
 )
 
 import socket
@@ -134,6 +135,66 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         await asyncio.sleep(0.5)
         status = await get_status(port=self.port)
         self.assertNotIn(pid, status)
+
+    async def test_call_on_manager_death(self):
+        port = find_free_port()
+
+        p1 = subprocess.Popen(
+            [sys.executable, "-m", "subprocess_monitor", "start", "--port", str(port)]
+        )
+        self.assertIsNone(p1.returncode)
+        status = await get_status(port=port)
+        self.assertIsInstance(status, list)
+        # assert p1  running
+        code = """
+import subprocess_monitor
+import time
+import os
+import sys
+
+KILL=False
+PID=os.environ.get("SUBPROCESS_MONITOR_PID")
+if PID is None:
+    sys.exit(2)
+
+def on_death():
+    global KILL
+    KILL=True
+    sys.exit(4)
+
+subprocess_monitor.call_on_manager_death(on_death, interval=0.5)
+print("KILL")
+for i in range(10):
+    time.sleep(1)
+    if KILL:
+        sys.exit(3)
+"""
+
+        self.assertIsNone(p1.returncode)
+
+        resp = await send_spawn_request(sys.executable, ["-c", code], port=port)
+        self.assertIn("pid", resp, resp)
+
+        status = await get_status(port=port)
+        self.assertIsInstance(status, list)
+        self.assertEqual(len(status), 1)
+
+        p2 = psutil.Process(status[0])
+
+        self.assertTrue(p2.is_running())
+
+        def on_death():
+            print("In code on_death")
+
+        import os
+
+        os.environ["SUBPROCESS_MONITOR_PID"] = str(p1.pid)
+        call_on_manager_death(on_death, interval=0.1)
+        time.sleep(1)
+        p1.kill()
+
+        rc = p2.wait()
+        self.assertEqual(rc, 3)
 
 
 # TODO: Uncomment this test, but its not working on ubuntu?
