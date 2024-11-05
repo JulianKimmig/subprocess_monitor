@@ -11,6 +11,7 @@ from .defaults import DEFAULT_PORT, DEFAULT_HOST
 
 
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler())
 
 PROCESS_OWNERSHIP: dict[int, Process] = {}
 SUBSCRIPTIONS: defaultdict[int, list[web.WebSocketResponse]] = defaultdict(list)
@@ -55,6 +56,7 @@ async def run_subprocess_monitor(
 ):
     check_interval = max(0.1, check_interval)  # Ensure period is not too small
     app = web.Application()
+    logger.info(f"Starting subprocess monitor on {host}:{port}...")
 
     # the index page shows the current status of the subprocesses
     async def index(req):
@@ -74,8 +76,13 @@ async def run_subprocess_monitor(
 
     async def stop(req: web.Request):
         request: StopProcessRequest = await req.json()
-        found = await stop_subprocess_request(request, asyncio.get_running_loop())
-        return web.json_response({"code": "success" if found else "failure"})
+        try:
+            found = await stop_subprocess_request(request, asyncio.get_running_loop())
+            return web.json_response({"code": "success" if found else "failure"})
+        except Exception as exc:
+            logger.error(f"Failed to stop subprocess {request['pid']}")
+            logger.exception(exc)
+            return web.json_response({"code": "failure", "error": str(exc)})
 
     app.router.add_get("/", index)
     app.router.add_post("/spawn", spawn)
@@ -95,7 +102,9 @@ async def run_subprocess_monitor(
             while True:
                 await asyncio.sleep(_scan_period)
                 await check_processes_step()
-
+        except Exception as exc:
+            logger.exception(exc)
+            raise exc
         finally:
             await runner.cleanup()
             await kill_all_subprocesses()
@@ -252,6 +261,8 @@ async def stop_subprocess_request(
 ):
     if loop is None:
         loop = asyncio.get_running_loop()
+
+    logger.info(f"Stopping subprocess with PID {request['pid']}...")
 
     pid = request["pid"]
     if pid not in PROCESS_OWNERSHIP:
