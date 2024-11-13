@@ -12,8 +12,7 @@ import time
 import os
 
 from subprocess_monitor.subprocess_monitor import (
-    run_subprocess_monitor,
-    PROCESS_OWNERSHIP,
+    SubprocessMonitor,
 )
 from subprocess_monitor.helper import (
     send_spawn_request,
@@ -41,10 +40,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         # self.host = os.uname()[1]  # "localhost"
         # get ip of localhost
         self.host = "localhost"  # socket.gethostbyname(hostname)
-
-        self.server_task = asyncio.create_task(
-            run_subprocess_monitor(port=self.port, check_interval=0.1, host=self.host)
+        self.monitor = SubprocessMonitor(
+            port=self.port, check_interval=0.1, host=self.host
         )
+        self.server_task = asyncio.create_task(self.monitor.run())
 
         # Allow some time for the server to start
         await asyncio.sleep(1)
@@ -63,7 +62,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def kill_all_subprocesses(self):
         """Helper function to kill all subprocesses."""
         tasks = []
-        for pid, process in list(PROCESS_OWNERSHIP.items()):
+        for pid, process in list(self.monitor.process_ownership.items()):
             tasks.append(self.stop_subprocess(process, pid))
         if tasks:
             await asyncio.gather(*tasks)
@@ -74,7 +73,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
             if process.returncode is None:
                 process.terminate()
                 await process.wait()
-            PROCESS_OWNERSHIP.pop(pid, None)
+            self.monitor.process_ownership.pop(pid, None)
         except Exception as e:
             logger.exception(f"Error stopping subprocess {pid}: {e}")
 
@@ -87,10 +86,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         response = await send_spawn_request(
             test_cmd, test_args, test_env, port=self.port, host=self.host
         )
-        self.assertEqual(response.get("code"), "success")
+        self.assertEqual(response.get("status"), "success", response)
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
-        self.assertIn(pid, PROCESS_OWNERSHIP)
+        self.assertIn(pid, self.monitor.process_ownership)
 
         # Wait briefly to allow subprocess to finish
         await asyncio.sleep(0.5)
@@ -104,14 +103,14 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         response = await send_spawn_request(
             sleep_cmd, sleep_args, port=self.port, host=self.host
         )
-        self.assertEqual(response.get("code"), "success")
+        self.assertEqual(response.get("status"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
-        self.assertIn(pid, PROCESS_OWNERSHIP)
+        self.assertIn(pid, self.monitor.process_ownership)
 
         # Stop the subprocess
         stop_response = await send_stop_request(pid, port=self.port, host=self.host)
-        self.assertEqual(stop_response.get("code"), "success")
+        self.assertEqual(stop_response.get("status"), "success")
 
         # Allow time for subprocess to terminate
         await asyncio.sleep(0.5)
@@ -130,10 +129,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         response = await send_spawn_request(
             test_cmd, test_args, {}, port=self.port, host=self.host
         )
-        self.assertEqual(response.get("code"), "success")
+        self.assertEqual(response.get("status"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
-        self.assertIn(pid, PROCESS_OWNERSHIP)
+        self.assertIn(pid, self.monitor.process_ownership)
 
         # Check status again
         status = await get_status(port=self.port, host=self.host)
@@ -297,10 +296,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 #         test_cmd = sys.executable
 #         test_args = ["-u", "-c", script]
 #         response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
-#         self.assertEqual(response.get("code"), "success")
+#         self.assertEqual(response.get("status"), "success")
 #         pid = response.get("pid")
 #         self.assertIsInstance(pid, int)
-#         self.assertIn(pid, PROCESS_OWNERSHIP)
+#         self.assertIn(pid, self.monitor.process_ownership)
 
 #         # Use the subscribe helper to capture output
 #         messages = []

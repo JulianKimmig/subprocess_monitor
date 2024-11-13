@@ -1,12 +1,22 @@
-from typing import Dict, Optional, List
-from aiohttp import ClientSession, WSMsgType
+from typing import Dict, Optional, List, cast, Callable
 import json
 import logging
 import os
-import psutil
 import time
 import threading
+import psutil
+from aiohttp import ClientSession, WSMsgType
+import asyncio
 from .defaults import DEFAULT_HOST, DEFAULT_PORT
+from .types import (
+    SpawnProcessRequest,
+    SpawnRequestResponse,
+    TypedClientResponse,
+    StopProcessRequest,
+    StopRequestResponse,
+    SubProcessIndexResponse,
+    StreamingLineOutput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,21 +27,19 @@ async def send_spawn_request(
     env: Optional[Dict[str, str]] = None,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-):
+) -> SpawnRequestResponse:
     if env is None:
         env = {}
     if args is None:
         args = []
-    req = {
-        "cmd": command,
-        "args": args,
-        "env": env,
-        "pid": None,
-    }
+    req = SpawnProcessRequest(cmd=command, args=args, env=env)
+
     async with ClientSession() as session:
         async with session.post(f"http://{host}:{port}/spawn", json=req) as resp:
-            response = await resp.json()
-            logger.info(f"Response from server: {json.dumps(response, indent=2)}")
+            response = await cast(
+                TypedClientResponse[SpawnRequestResponse], resp
+            ).json()
+            logger.info("Response from server: %s", json.dumps(response, indent=2))
             return response
 
 
@@ -39,37 +47,41 @@ async def send_stop_request(
     pid: int,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-):
-    req = {
-        "pid": pid,
-    }
+) -> StopRequestResponse:
+    req = StopProcessRequest(pid=pid)
+
     async with ClientSession() as session:
         async with session.post(f"http://{host}:{port}/stop", json=req) as resp:
-            response = await resp.json()
-            logger.info(f"Response from server: {json.dumps(response, indent=2)}")
+            response = await cast(TypedClientResponse[StopRequestResponse], resp).json()
+            logger.info("Response from server: %s", json.dumps(response, indent=2))
             return response
 
 
 async def get_status(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-):
+) -> SubProcessIndexResponse:
     async with ClientSession() as session:
         async with session.get(f"http://{host}:{port}/") as resp:
-            response = await resp.json()
-            logger.info(f"Current subprocess status: {json.dumps(response, indent=2)}")
+            response = await cast(
+                TypedClientResponse[SubProcessIndexResponse], resp
+            ).json()
+            logger.info("Current subprocess status: %s", json.dumps(response, indent=2))
             return response
 
 
-def _default_callback(data):
+def _default_callback(data: StreamingLineOutput):
     print(f"[{data['stream'].upper()}] PID {data['pid']}: {data['data']}")
 
 
 async def subscribe(
-    pid: int, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, callback=None
-):
+    pid: int,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    callback: Optional[Callable[[StreamingLineOutput], None]] = None,
+) -> None:
     url = f"http://{host}:{port}/subscribe?pid={pid}"
-    print(f"Subscribing to output for process with PID {pid}...")
+    logger.info("Subscribing to output for process with PID %d...", pid)
     if callback is None:
         callback = _default_callback
 
@@ -82,10 +94,10 @@ async def subscribe(
                     callback(data)
 
                 elif msg.type == WSMsgType.ERROR:
-                    print(f"Error in WebSocket connection: {ws.exception()}")
+                    logger.error("Error in WebSocket connection: %s", ws.exception())
                     break
 
-            print(f"WebSocket connection for PID {pid} closed.")
+            logger.info(f"WebSocket connection for PID {pid} closed.")
 
 
 def call_on_manager_death(callback, manager_pid=None, interval=10):
@@ -112,3 +124,34 @@ def call_on_manager_death(callback, manager_pid=None, interval=10):
     # check if p is running
     if not p.is_alive():
         raise ValueError("Thread is not running")
+
+
+def remote_spawn_subprocess(
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+    host=DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+):
+    """
+    sends a spwan request to the service
+
+    command: the command to spawn
+    args: the arguments of the command
+    env: the environment variables
+    port: the port that the service is deployed on
+    """
+
+    async def send_request():
+        req = SpawnProcessRequest(cmd=command, args=args, env=env)
+        logger.info(f"Sending request to spawn subprocess: {json.dumps(req, indent=2)}")
+        async with ClientSession() as session:
+            async with session.post(
+                f"http://{host}:{port}/spawn",
+                json=req,
+            ) as resp:
+                ans = await resp.json()
+                logger.info(json.dumps(ans, indent=2, ensure_ascii=True))
+                return ans
+
+    return asyncio.run(send_request())
