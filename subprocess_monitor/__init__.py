@@ -1,7 +1,4 @@
-from .subprocess_monitor import (
-    run_subprocess_monitor,
-    remote_spawn_subprocess,
-)
+from .subprocess_monitor import run_subprocess_monitor, SubprocessMonitor
 
 from .helper import (
     send_spawn_request,
@@ -9,10 +6,12 @@ from .helper import (
     get_status,
     subscribe,
     call_on_manager_death,
+    remote_spawn_subprocess,
 )
 
 
 __all__ = [
+    "SubprocessMonitor",
     "run_subprocess_monitor",
     "remote_spawn_subprocess",
     "send_spawn_request",
