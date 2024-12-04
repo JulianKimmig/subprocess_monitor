@@ -6,6 +6,7 @@ import logging
 import os
 import json
 from asyncio.subprocess import Process
+from multiprocessing import Process as MultiprocessingProcess
 import psutil
 from aiohttp import web, WSMsgType
 from .defaults import DEFAULT_PORT, DEFAULT_HOST
@@ -380,3 +381,36 @@ def run_subprocess_monitor(
     return SubprocessMonitor(host, port, check_interval).run()
 
     # the index page shows the current status of the subprocesses
+
+
+def create_subprocess_monitor_thread(
+    host: str = DEFAULT_HOST,
+    port: Optional[int] = None,
+    set_os_environ: bool = True,
+    **kwargs,
+):
+    """
+    Create a subprocess monitor thread
+
+    host: the host to run the service on
+    port: the port to run the service on
+    set_os_environ: set the SUBPROCESS_MONITOR_PORT and SUBPROCESS_MONITOR_PID environment variables
+    kwargs: additional arguments to pass to the subprocess monitor
+    """
+
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
+
+    kwargs["port"] = port
+    kwargs["host"] = host
+    subprocess_monitor_process = MultiprocessingProcess(
+        target=run_subprocess_monitor,
+        kwargs=kwargs,
+        daemon=True,
+    )
+    subprocess_monitor_process.start()
+    if set_os_environ:
+        os.environ["SUBPROCESS_MONITOR_PORT"] = str(port)
+        os.environ["SUBPROCESS_MONITOR_PID"] = str(subprocess_monitor_process.pid)
+
+    return subprocess_monitor_process
