@@ -368,7 +368,7 @@ class SubprocessMonitor:
         return self.run().__await__()
 
 
-def run_subprocess_monitor(
+async def run_subprocess_monitor(
     host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, check_interval: float = 2
 ):
     """
@@ -378,9 +378,24 @@ def run_subprocess_monitor(
     port: the port to run the service on
     check_interval: the interval to check the subprocesses
     """
-    return SubprocessMonitor(host, port, check_interval).run()
+
+    return await SubprocessMonitor(host, port, check_interval).run()
 
     # the index page shows the current status of the subprocesses
+
+
+def sync_run_subprocess_monitor(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, check_interval: float = 2
+):
+    """
+    Run the subprocess monitor service synchronously
+
+    host: the host to run the service on
+    port: the port to run the service on
+    check_interval: the interval to check the subprocesses
+    """
+
+    asyncio.run(run_subprocess_monitor(host, port, check_interval))
 
 
 def create_subprocess_monitor_thread(
@@ -404,7 +419,7 @@ def create_subprocess_monitor_thread(
     kwargs["port"] = port
     kwargs["host"] = host
     subprocess_monitor_process = MultiprocessingProcess(
-        target=run_subprocess_monitor,
+        target=sync_run_subprocess_monitor,
         kwargs=kwargs,
         daemon=True,
     )
