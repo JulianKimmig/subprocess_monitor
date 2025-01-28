@@ -100,7 +100,25 @@ async def subscribe(
             logger.info(f"WebSocket connection for PID {pid} closed.")
 
 
-def call_on_manager_death(callback, manager_pid=None, interval=10):
+def call_on_process_death(callback: Callable[[], None], pid: int, interval: float = 10):
+    pid = int(pid)
+
+    def call_on_death():
+        while True:
+            if not psutil.pid_exists(pid):
+                callback()
+                break
+            time.sleep(interval)
+
+    p = threading.Thread(target=call_on_death, daemon=True)
+    p.start()
+
+
+def call_on_manager_death(
+    callback: Callable[[], None],
+    manager_pid: Optional[int] = None,
+    interval: float = 10,
+):
     if manager_pid is None:
         manager_pid = os.environ.get("SUBPROCESS_MONITOR_PID")
 
