@@ -211,6 +211,7 @@ class SubprocessMonitor:
         full_command = [cmd] + args
 
         env["SUBPROCESS_MONITOR_PORT"] = str(self.port)
+        env["SUBPROCESS_MONITOR_HOST"] = self.host
         env["SUBPROCESS_MONITOR_PID"] = str(os.getpid())
 
         env = {**os.environ, **env}
@@ -294,11 +295,18 @@ class SubprocessMonitor:
         runner = web.AppRunner(self.app)
 
         self._running = True
+        o_SUBPROCESS_MONITOR_PORT = os.getenv("SUBPROCESS_MONITOR_PORT")
+        o_SUBPROCESS_MONITOR_PID = os.getenv("SUBPROCESS_MONITOR_PID")
+        o_SUBPROCESS_MONITOR_HOST = os.getenv("SUBPROCESS_MONITOR_HOST")
         try:
             logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
             await runner.setup()
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
+
+            os.environ["SUBPROCESS_MONITOR_PORT"] = str(self.port)
+            os.environ["SUBPROCESS_MONITOR_HOST"] = self.host
+            os.environ["SUBPROCESS_MONITOR_PID"] = str(os.getpid())
 
             while self._running:
                 await asyncio.sleep(_scan_period)
@@ -313,6 +321,18 @@ class SubprocessMonitor:
                 for subs in self.subscriptions.values():
                     for ws in subs:
                         await ws.close()
+            if o_SUBPROCESS_MONITOR_PORT is not None:
+                os.environ["SUBPROCESS_MONITOR_PORT"] = o_SUBPROCESS_MONITOR_PORT
+            else:
+                os.environ.pop("SUBPROCESS_MONITOR_PORT", None)
+            if o_SUBPROCESS_MONITOR_PID is not None:
+                os.environ["SUBPROCESS_MONITOR_PID"] = o_SUBPROCESS_MONITOR_PID
+            else:
+                os.environ.pop("SUBPROCESS_MONITOR_PID", None)
+            if o_SUBPROCESS_MONITOR_HOST is not None:
+                os.environ["SUBPROCESS_MONITOR_HOST"] = o_SUBPROCESS_MONITOR_HOST
+            else:
+                os.environ.pop("SUBPROCESS_MONITOR_HOST", None)
             await runner.cleanup()
 
     async def run(self) -> None:
