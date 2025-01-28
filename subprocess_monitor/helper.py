@@ -21,13 +21,22 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
+class SubprocessMonitorConnectionError(Exception):
+    pass
+
+
 async def send_spawn_request(
     command: str,
     args: Optional[List[str]] = None,
     env: Optional[Dict[str, str]] = None,
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> SpawnRequestResponse:
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
+
     if env is None:
         env = {}
     if args is None:
@@ -45,10 +54,14 @@ async def send_spawn_request(
 
 async def send_stop_request(
     pid: int,
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> StopRequestResponse:
     req = StopProcessRequest(pid=pid)
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
 
     async with ClientSession() as session:
         async with session.post(f"http://{host}:{port}/stop", json=req) as resp:
@@ -58,9 +71,13 @@ async def send_stop_request(
 
 
 async def get_status(
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> SubProcessIndexResponse:
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
     async with ClientSession() as session:
         async with session.get(f"http://{host}:{port}/") as resp:
             response = await cast(
@@ -76,10 +93,14 @@ def _default_callback(data: StreamingLineOutput):
 
 async def subscribe(
     pid: int,
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
     callback: Optional[Callable[[StreamingLineOutput], None]] = None,
 ) -> None:
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
     url = f"http://{host}:{port}/subscribe?pid={pid}"
     logger.info("Subscribing to output for process with PID %d...", pid)
     if callback is None:
@@ -100,7 +121,17 @@ async def subscribe(
             logger.info(f"WebSocket connection for PID {pid} closed.")
 
 
-def call_on_process_death(callback: Callable[[], None], pid: int, interval: float = 10):
+def call_on_process_death(
+    callback: Callable[[], None],
+    pid: int,
+    interval: float = 10,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+):
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
     pid = int(pid)
 
     def call_on_death():
@@ -148,8 +179,8 @@ def remote_spawn_subprocess(
     command: str,
     args: list[str],
     env: dict[str, str],
-    host=DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
 ):
     """
     sends a spwan request to the service
@@ -159,6 +190,11 @@ def remote_spawn_subprocess(
     env: the environment variables
     port: the port that the service is deployed on
     """
+
+    if host is None:
+        host = os.environ.get("SUBPROCESS_MONITOR_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
 
     async def send_request():
         req = SpawnProcessRequest(cmd=command, args=args, env=env)
