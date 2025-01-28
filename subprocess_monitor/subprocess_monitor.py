@@ -307,16 +307,13 @@ class SubprocessMonitor:
             logger.exception(exc)
             raise exc
         finally:
-            await runner.cleanup()
             await self.kill_all_subprocesses()
-
             # Close all WebSocket connections
             async with self.subscription_lock:
                 for subs in self.subscriptions.values():
                     for ws in subs:
                         await ws.close()
-
-            await asyncio.sleep(0.5)
+            await runner.cleanup()
 
     async def run(self) -> None:
         self._running = True
