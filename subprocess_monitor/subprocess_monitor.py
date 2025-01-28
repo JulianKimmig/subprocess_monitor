@@ -41,6 +41,30 @@ def terminate_subprocess_sync(process: Process):
     except Exception as exc:
         logger.exception(exc)
         logger.error(f"Error terminating subprocess {process.pid}: {exc}")
+    finally:
+        close_process_streams(process)
+
+
+def close_process_streams(process: Process):
+    """Ensure all process streams are closed to prevent unclosed pipe warnings."""
+    try:
+        if process.stdout and not process.stdout.at_eof():
+            process.stdout.close()
+    except Exception:
+        pass
+    try:
+        if process.stderr and not process.stderr.at_eof():
+            process.stderr.close()
+    except Exception:
+        pass
+
+    try:
+        if process.stdin:
+            process.stdin.close()
+    except Exception:
+        pass
+
+    process._transport.close()
 
 
 def kill_subprocess_sync(process: Process):
@@ -50,6 +74,8 @@ def kill_subprocess_sync(process: Process):
     except Exception as exc:
         logger.exception(exc)
         logger.error(f"Error killing subprocess {process.pid}: {exc}")
+    finally:
+        close_process_streams(process)
 
 
 class SubprocessMonitor:
@@ -73,6 +99,7 @@ class SubprocessMonitor:
         )
 
         self.app = web.Application()
+        self._running = False
 
         self.app.router.add_get("/", self.index)
         self.app.router.add_post("/spawn", self.spawn)
@@ -240,13 +267,18 @@ class SubprocessMonitor:
         )
 
     async def check_terminated(self, process: Process, pid: int) -> None:
+        if pid not in self.process_ownership:
+            return
         try:
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=10)
         except Exception:
             pass
         if process.returncode is None:
             kill_subprocess_sync(process)
+            return await self.check_terminated(process, pid)
 
+        if pid not in self.process_ownership:
+            return
         async with self.process_ownership_lock:
             del self.process_ownership[pid]
 
@@ -261,13 +293,14 @@ class SubprocessMonitor:
         _scan_period = self.check_interval
         runner = web.AppRunner(self.app)
 
+        self._running = True
         try:
             logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
             await runner.setup()
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
 
-            while True:
+            while self._running:
                 await asyncio.sleep(_scan_period)
                 await self.check_processes_step()
         except Exception as exc:
@@ -283,7 +316,10 @@ class SubprocessMonitor:
                     for ws in subs:
                         await ws.close()
 
+            await asyncio.sleep(0.5)
+
     async def run(self) -> None:
+        self._running = True
         try:
             await self.serve()
         finally:
@@ -292,6 +328,9 @@ class SubprocessMonitor:
                     process.kill()
                 except Exception:
                     pass
+
+    def stop_serve(self) -> None:
+        self._running = False
 
     async def stop_subprocess_request(
         self,
@@ -322,10 +361,20 @@ class SubprocessMonitor:
         )
 
     async def stream_subprocess_output(self, pid: int, process: Process) -> None:
-        async def read_stream(stream, stream_name):
+        async def read_stream(stream: asyncio.StreamReader, stream_name):
             while True:
-                line = await stream.readline()
-                if line:
+                # Check if the subprocess has exited
+                if process.returncode is not None:
+                    break
+
+                try:
+                    # Read a line from the stream with a timeout
+                    line = await asyncio.wait_for(stream.readline(), timeout=5)
+                except asyncio.TimeoutError:
+                    continue  # Retry on timeout
+                except ValueError:
+                    break  # Stream is closed, exit the loop
+                if line:  # If line is not empty, process it
                     message = json.dumps(
                         StreamingLineOutput(
                             stream=stream_name, pid=pid, data=line.decode().rstrip()
@@ -333,7 +382,7 @@ class SubprocessMonitor:
                     )
                     await self.broadcast_output(pid, message)
                 else:
-                    break
+                    break  # EOF reached, exit the loop
 
         await asyncio.gather(
             read_stream(process.stdout, "stdout"), read_stream(process.stderr, "stderr")
