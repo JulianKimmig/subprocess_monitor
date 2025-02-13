@@ -9,6 +9,7 @@ from asyncio.subprocess import Process
 from multiprocessing import Process as MultiprocessingProcess
 import psutil
 from aiohttp import web, WSMsgType
+import socket
 from .defaults import DEFAULT_PORT, DEFAULT_HOST
 
 from .types import (
@@ -78,15 +79,57 @@ def kill_subprocess_sync(process: Process):
         close_process_streams(process)
 
 
+def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int:
+    """
+    Find a free port in the given range
+
+    start_port: the start port to search from
+    end_port: the end port to search to
+    """
+
+    for port in range(start_port, end_port + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port))  # Try to bind to the port
+        except OSError:
+            continue
+        return port
+    raise ValueError("No free ports available")
+
+
+def set_os_env_vars(
+    port: int,
+    host: str = DEFAULT_HOST,
+    pid: Optional[int] = None,
+    env: Optional[dict] = None,
+) -> None:
+    """
+    Set the environment variables for the subprocess monitor
+
+    port: the port to set
+    host: the host to set
+    pid: the PID to set
+    env: the environment to set the variables in (default: os.environ)
+    """
+    if env is None:
+        env = os.environ
+    if pid is None:
+        pid = os.getpid()
+
+    env["SUBPROCESS_MONITOR_PORT"] = str(port)
+    env["SUBPROCESS_MONITOR_HOST"] = host
+    env["SUBPROCESS_MONITOR_PID"] = str(pid)
+
+
 class SubprocessMonitor:
     def __init__(
         self,
         host: str = DEFAULT_HOST,
-        port: int = DEFAULT_PORT,
+        port: Optional[int] = None,
         check_interval: float = 2,
     ):
         self.host = host
-        self.port = port
+        self.port = port or find_free_port()
 
         check_interval = max(0.1, check_interval)  # Ensure period is not too small
         self.check_interval = check_interval
@@ -210,9 +253,7 @@ class SubprocessMonitor:
         logger.info(f"Starting subprocess: {cmd} {args} with environment: {env}")
         full_command = [cmd] + args
 
-        env["SUBPROCESS_MONITOR_PORT"] = str(self.port)
-        env["SUBPROCESS_MONITOR_HOST"] = self.host
-        env["SUBPROCESS_MONITOR_PID"] = str(os.getpid())
+        set_os_env_vars(self.port, self.host, env=env)
 
         env = {**os.environ, **env}
 
@@ -304,9 +345,7 @@ class SubprocessMonitor:
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
 
-            os.environ["SUBPROCESS_MONITOR_PORT"] = str(self.port)
-            os.environ["SUBPROCESS_MONITOR_HOST"] = self.host
-            os.environ["SUBPROCESS_MONITOR_PID"] = str(os.getpid())
+            set_os_env_vars(self.port, self.host)
 
             while self._running:
                 await asyncio.sleep(_scan_period)
@@ -321,6 +360,7 @@ class SubprocessMonitor:
                 for subs in self.subscriptions.values():
                     for ws in subs:
                         await ws.close()
+
             if o_SUBPROCESS_MONITOR_PORT is not None:
                 os.environ["SUBPROCESS_MONITOR_PORT"] = o_SUBPROCESS_MONITOR_PORT
             else:
@@ -435,7 +475,7 @@ class SubprocessMonitor:
 
 
 async def run_subprocess_monitor(
-    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, check_interval: float = 2
+    host: str = DEFAULT_HOST, port: Optional[int] = None, check_interval: float = 2
 ):
     """
     Run the subprocess monitor service
@@ -445,7 +485,9 @@ async def run_subprocess_monitor(
     check_interval: the interval to check the subprocesses
     """
 
-    return await SubprocessMonitor(host, port, check_interval).run()
+    return await SubprocessMonitor(
+        host=host, port=port, check_interval=check_interval
+    ).run()
 
     # the index page shows the current status of the subprocesses
 
@@ -479,10 +521,7 @@ def create_subprocess_monitor_thread(
     kwargs: additional arguments to pass to the subprocess monitor
     """
 
-    if port is None:
-        port = int(os.environ.get("SUBPROCESS_MONITOR_PORT", DEFAULT_PORT))
-
-    kwargs["port"] = port
+    kwargs["port"] = port or find_free_port()
     kwargs["host"] = host
     subprocess_monitor_process = MultiprocessingProcess(
         target=sync_run_subprocess_monitor,
@@ -491,7 +530,10 @@ def create_subprocess_monitor_thread(
     )
     subprocess_monitor_process.start()
     if set_os_environ:
-        os.environ["SUBPROCESS_MONITOR_PORT"] = str(port)
-        os.environ["SUBPROCESS_MONITOR_PID"] = str(subprocess_monitor_process.pid)
+        set_os_env_vars(
+            kwargs["port"],
+            host,
+            pid=subprocess_monitor_process.pid,
+        )
 
     return subprocess_monitor_process
