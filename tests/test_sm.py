@@ -13,20 +13,13 @@ import os
 
 from subprocess_monitor.subprocess_monitor import (
     SubprocessMonitor,
+    find_free_port,
 )
 from subprocess_monitor.helper import (
     send_spawn_request,
     send_stop_request,
     get_status,
 )
-
-import socket
-
-
-def find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 logging.basicConfig(level=logging.INFO)
@@ -36,13 +29,12 @@ logger = logging.getLogger(__name__)
 class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Set up the aiohttp server before each test."""
-        self.port = find_free_port()
+
         # self.host = os.uname()[1]  # "localhost"
         # get ip of localhost
         self.host = "localhost"  # socket.gethostbyname(hostname)
-        self.monitor = SubprocessMonitor(
-            port=self.port, check_interval=0.1, host=self.host
-        )
+        self.monitor = SubprocessMonitor(check_interval=0.1, host=self.host)
+        self.port = self.monitor.port
         self.server_task = asyncio.create_task(self.monitor.run())
 
         # Allow some time for the server to start
@@ -173,12 +165,19 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
     async def test_spawn_external_manager(self):
         p1, port = self._spwan_new_manager()
+        p2, port2 = self._spwan_new_manager()
 
-        self.assertIsNone(p1.returncode)
+        try:
+            self.assertIsNone(p1.returncode)
+            self.assertIsNone(p2.returncode)
 
-        status = await get_status(port=port, host=self.host)
-        self.assertIsInstance(status, list)
-        p1.kill()
+            status = await get_status(port=port, host=self.host)
+            self.assertIsInstance(status, list)
+            status = await get_status(port=port2, host=self.host)
+            self.assertIsInstance(status, list)
+        finally:
+            p1.kill()
+            p2.kill()
 
 
 # TODO:The follwoing 2 tests fail on ubuntu since the exit status is None
