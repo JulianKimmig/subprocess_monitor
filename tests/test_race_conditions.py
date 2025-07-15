@@ -135,13 +135,18 @@ class TestRaceConditions(IsolatedAsyncioTestCase):
             max_recursion, 1, "Expected recursive calls to check_terminated"
         )
 
-        # Force cleanup
+        # Force cleanup - use cross-platform approach
         try:
             import os
             import signal
 
-            os.kill(pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
+            # Use SIGTERM on Windows, SIGKILL on Unix
+            if hasattr(signal, "SIGKILL"):
+                os.kill(pid, signal.SIGKILL)
+            else:
+                # Windows fallback - terminate the process
+                os.kill(pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError, AttributeError):
             pass
 
     async def test_websocket_subscription_cleanup_race(self):
