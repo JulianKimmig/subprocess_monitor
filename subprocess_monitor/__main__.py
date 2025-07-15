@@ -128,7 +128,9 @@ def main():
 
     if args.command == "start":
         asyncio.run(
-            run_subprocess_monitor(port=args.port, check_interval=args.check_interval)
+            run_subprocess_monitor(
+                host=args.host, port=args.port, check_interval=args.check_interval
+            )
         )
 
     elif args.command == "spawn":

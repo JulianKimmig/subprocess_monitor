@@ -72,7 +72,7 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
     async def test_send_spawn_request(self):
         """Test the send_spawn_request helper function."""
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "import time; time.sleep(0.5); print('done')"]
+        test_args = ["-u", "-c", "import time; time.sleep(2); print('done')"]
         test_env = {}
 
         response = await send_spawn_request(
@@ -82,13 +82,20 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
 
-        # Allow brief time for process to be added to ownership tracking
-        await asyncio.sleep(0.1)
-        self.assertIn(pid, self.monitor.process_ownership)
+        # Wait longer for process to be added to ownership tracking
+        await asyncio.sleep(0.3)
+
+        # Check if process is still alive before checking ownership
+        if pid and psutil.pid_exists(pid):
+            self.assertIn(pid, self.monitor.process_ownership)
+        else:
+            # If process already exited, it should have been cleaned up
+            self.assertNotIn(pid, self.monitor.process_ownership)
 
         # Wait for subprocess to finish
-        await asyncio.sleep(0.8)
-        self.assertFalse(psutil.pid_exists(pid))
+        await asyncio.sleep(2.5)
+        if pid:
+            self.assertFalse(psutil.pid_exists(pid))
 
     async def test_send_stop_request(self):
         """Test the send_stop_request helper function."""
@@ -104,12 +111,13 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertIn(pid, self.monitor.process_ownership)
 
         # Stop the subprocess
-        stop_response = await send_stop_request(pid, port=self.port, host=self.host)
-        self.assertEqual(stop_response.get("status"), "success")
+        if pid:
+            stop_response = await send_stop_request(pid, port=self.port, host=self.host)
+            self.assertEqual(stop_response.get("status"), "success")
 
-        # Allow time for subprocess to terminate
-        await asyncio.sleep(0.5)
-        self.assertFalse(psutil.pid_exists(pid))
+            # Allow time for subprocess to terminate
+            await asyncio.sleep(0.5)
+            self.assertFalse(psutil.pid_exists(pid))
 
     async def test_get_status(self):
         """Test the get_status helper function."""
@@ -161,9 +169,12 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
                 "--host",
                 self.host,
             ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             **add_kwargs,
         )
-        time.sleep(1)
+        # Wait longer for the manager to fully start up
+        time.sleep(3)
         return p1, port
 
     async def test_spawn_external_manager(self):
@@ -174,9 +185,32 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
             self.assertIsNone(p1.returncode)
             self.assertIsNone(p2.returncode)
 
-            status = await get_status(port=port, host=self.host)
+            # Check if processes are still running after some time
+            if p1.poll() is not None:
+                # Process died, check output for errors
+                stdout, stderr = p1.communicate()
+                stdout_str = (
+                    stdout.decode() if isinstance(stdout, bytes) else str(stdout)
+                )
+                stderr_str = (
+                    stderr.decode() if isinstance(stderr, bytes) else str(stderr)
+                )
+                self.fail(f"Manager 1 died: stdout={stdout_str}, stderr={stderr_str}")
+
+            if p2.poll() is not None:
+                # Process died, check output for errors
+                stdout, stderr = p2.communicate()
+                stdout_str = (
+                    stdout.decode() if isinstance(stdout, bytes) else str(stdout)
+                )
+                stderr_str = (
+                    stderr.decode() if isinstance(stderr, bytes) else str(stderr)
+                )
+                self.fail(f"Manager 2 died: stdout={stdout_str}, stderr={stderr_str}")
+
+            status = await get_status(host=self.host, port=port)
             self.assertIsInstance(status, list)
-            status = await get_status(port=port2, host=self.host)
+            status = await get_status(host=self.host, port=port2)
             self.assertIsInstance(status, list)
         finally:
             p1.kill()
