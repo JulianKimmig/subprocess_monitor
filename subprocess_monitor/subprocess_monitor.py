@@ -29,11 +29,12 @@ from .types import (
 )
 
 
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.StreamHandler())
 
 
-def terminate_subprocess_sync(process: Process):
+def terminate_subprocess_sync(process: Process, logger: Optional[logging.Logger] = None):
+    logger = logger or LOGGER
     try:
         process.terminate()
         logger.info(f"Terminated subprocess {process.pid}")
@@ -43,11 +44,12 @@ def terminate_subprocess_sync(process: Process):
         logger.exception(exc)
         logger.error(f"Error terminating subprocess {process.pid}: {exc}")
     finally:
-        close_process_streams(process)
+        close_process_streams(process, logger)
 
 
-def close_process_streams(process: Process):
+def close_process_streams(process: Process, logger: Optional[logging.Logger] = None):
     """Ensure all process streams are closed to prevent unclosed pipe warnings."""
+    logger = logger or LOGGER
     try:
         if process.stdout and not process.stdout.at_eof():
             process.stdout.close()
@@ -68,7 +70,8 @@ def close_process_streams(process: Process):
     process._transport.close()
 
 
-def kill_subprocess_sync(process: Process):
+def kill_subprocess_sync(process: Process, logger: Optional[logging.Logger] = None):
+    logger = logger or LOGGER
     try:
         process.kill()
         logger.warning(f"Killed subprocess {process.pid}")
@@ -76,7 +79,7 @@ def kill_subprocess_sync(process: Process):
         logger.exception(exc)
         logger.error(f"Error killing subprocess {process.pid}: {exc}")
     finally:
-        close_process_streams(process)
+        close_process_streams(process, logger)
 
 
 def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int:
@@ -127,10 +130,11 @@ class SubprocessMonitor:
         host: str = DEFAULT_HOST,
         port: Optional[int] = None,
         check_interval: float = 2,
+        logger: Optional[logging.Logger] = None,
     ):
         self.host = host
         self.port = port or find_free_port()
-
+        self.logger = logger or LOGGER
         check_interval = max(0.1, check_interval)  # Ensure period is not too small
         self.check_interval = check_interval
         self.process_ownership_lock = asyncio.Lock()
@@ -172,8 +176,8 @@ class SubprocessMonitor:
             )
         except Exception as exc:
             cmd = " ".join([request["cmd"], *request["args"]])
-            logger.error("Failed to start subprocess: %s", cmd)
-            logger.exception(exc)
+            self.logger.error("Failed to start subprocess: %s", cmd)
+            self.logger.exception(exc)
             return cast(
                 TypedJSONResponse[SpawnRequestResponse],
                 web.json_response(
@@ -204,8 +208,8 @@ class SubprocessMonitor:
                     ),
                 )
         except Exception as exc:
-            logger.error("Failed to stop subprocess %s", request["pid"])
-            logger.exception(exc)
+            self.logger.error("Failed to stop subprocess %s", request["pid"])
+            self.logger.exception(exc)
             return cast(
                 TypedJSONResponse[StopRequestFailureResponse],
                 web.json_response(
@@ -225,7 +229,7 @@ class SubprocessMonitor:
         await ws.prepare(request)
         async with self.subscription_lock:
             self.subscriptions[pid].append(ws)
-        logger.info("Client subscribed to subprocess %d output.", pid)
+        self.logger.info("Client subscribed to subprocess %d output.", pid)
 
         try:
             async for msg in ws:
@@ -233,15 +237,15 @@ class SubprocessMonitor:
                     # You can handle incoming messages from the client here if needed
                     pass
                 elif msg.type == WSMsgType.ERROR:
-                    logger.exception(ws.exception())
-                    logger.error(
+                    self.logger.exception(ws.exception())
+                    self.logger.error(
                         "WebSocket connection closed with exception %s", ws.exception()
                     )
         finally:
             async with self.subscription_lock:
                 if pid in self.subscriptions and ws in self.subscriptions[pid]:
                     self.subscriptions[pid].remove(ws)
-            logger.info("Client unsubscribed from subprocess %d output.", pid)
+            self.logger.info("Client unsubscribed from subprocess %d output.", pid)
 
         return ws
 
@@ -250,7 +254,7 @@ class SubprocessMonitor:
         args = request["args"]
         env = request.get("env", {})
 
-        logger.info(f"Starting subprocess: {cmd} {args} with environment: {env}")
+        self.logger.info(f"Starting subprocess: {cmd} {args} with environment: {env}")
         full_command = [cmd] + args
 
         set_os_env_vars(self.port, self.host, env=env)
@@ -266,7 +270,7 @@ class SubprocessMonitor:
 
         async with self.process_ownership_lock:
             self.process_ownership[process.pid] = process
-        logger.info(
+        self.logger.info(
             "Started subprocess: %s %s with PID %d", cmd, " ".join(args), process.pid
         )
         # Start tasks to read stdout and stderr
@@ -302,7 +306,7 @@ class SubprocessMonitor:
         if pid is None:
             raise ValueError("PID not found")
 
-        terminate_subprocess_sync(process)
+        terminate_subprocess_sync(process, self.logger)
 
         loop.call_soon_threadsafe(
             asyncio.create_task, self.check_terminated(process, pid)
@@ -316,7 +320,7 @@ class SubprocessMonitor:
         except Exception:
             pass
         if process.returncode is None:
-            kill_subprocess_sync(process)
+            kill_subprocess_sync(process, self.logger)
             return await self.check_terminated(process, pid)
 
         if pid not in self.process_ownership:
@@ -325,7 +329,7 @@ class SubprocessMonitor:
             del self.process_ownership[pid]
 
     async def kill_all_subprocesses(self) -> None:
-        logger.info("Killing all subprocesses...")
+        self.logger.info("Killing all subprocesses...")
         for pid, process in list(self.process_ownership.items()):
             await self.stop_subprocess(process, pid)
 
@@ -340,7 +344,7 @@ class SubprocessMonitor:
         o_SUBPROCESS_MONITOR_PID = os.getenv("SUBPROCESS_MONITOR_PID")
         o_SUBPROCESS_MONITOR_HOST = os.getenv("SUBPROCESS_MONITOR_HOST")
         try:
-            logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
+            self.logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
             await runner.setup()
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
@@ -351,7 +355,7 @@ class SubprocessMonitor:
                 await asyncio.sleep(_scan_period)
                 await self.check_processes_step()
         except Exception as exc:
-            logger.exception(exc)
+            self.logger.exception(exc)
             raise exc
         finally:
             await self.kill_all_subprocesses()
@@ -397,7 +401,7 @@ class SubprocessMonitor:
         if loop is None:
             loop = asyncio.get_running_loop()
 
-        logger.info(f"Stopping subprocess with PID {request['pid']}...")
+        self.logger.info(f"Stopping subprocess with PID {request['pid']}...")
 
         pid = request["pid"]
         if pid not in self.process_ownership:
@@ -452,15 +456,16 @@ class SubprocessMonitor:
 
         for pid, process in list(self.process_ownership.items()):
             try:
-                if (
-                    psutil.pid_exists(pid)
-                    and psutil.Process(pid).status() == psutil.STATUS_RUNNING
-                ):
-                    continue
+                if psutil.pid_exists(pid):
+                    proc_status = psutil.Process(pid).status()
+                    # Only terminate if process is actually dead (zombie/dead), not just sleeping/idle
+                    if proc_status not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                        continue
+
             except psutil.NoSuchProcess:
                 pass
-
-            logger.info("Process %d is not running (%d)", pid, process.returncode)
+            
+            self.logger.info("Process %d is not running (%d)", pid, process.returncode or 0)
             await self.stop_subprocess(process, pid)
 
         async with self.subscription_lock:
