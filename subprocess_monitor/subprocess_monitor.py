@@ -33,7 +33,9 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.StreamHandler())
 
 
-def terminate_subprocess_sync(process: Process, logger: Optional[logging.Logger] = None):
+def terminate_subprocess_sync(
+    process: Process, logger: Optional[logging.Logger] = None
+):
     logger = logger or LOGGER
     try:
         process.terminate()
@@ -285,48 +287,87 @@ class SubprocessMonitor:
     ) -> None:
         if loop is None:
             loop = asyncio.get_running_loop()
+
         if process is None:
             if pid is None:
                 raise ValueError("Either process or pid must be provided")
 
-            if pid not in self.process_ownership:
-                raise ValueError("PID not found")
-            if self.process_ownership[pid].pid == pid:
+            # Use lock to safely access process_ownership
+            async with self.process_ownership_lock:
+                if pid not in self.process_ownership:
+                    raise ValueError("PID not found")
                 process = self.process_ownership[pid]
 
         if process is None:
             raise ValueError("Process not found")
 
         if pid is None:
-            for _pid, _process in self.process_ownership.items():
-                if process == _process:
-                    pid = _pid
-                    break
+            # Use lock to safely search for pid
+            async with self.process_ownership_lock:
+                for _pid, _process in self.process_ownership.items():
+                    if process == _process:
+                        pid = _pid
+                        break
 
         if pid is None:
             raise ValueError("PID not found")
 
         terminate_subprocess_sync(process, self.logger)
 
+        # Clean up WebSocket subscriptions immediately
+        async with self.subscription_lock:
+            if pid in self.subscriptions:
+                for ws in self.subscriptions[pid]:
+                    try:
+                        await ws.close()
+                    except Exception as e:
+                        self.logger.warning(f"Error closing WebSocket: {e}")
+                del self.subscriptions[pid]
+
         loop.call_soon_threadsafe(
             asyncio.create_task, self.check_terminated(process, pid)
         )
 
-    async def check_terminated(self, process: Process, pid: int) -> None:
-        if pid not in self.process_ownership:
-            return
+    async def check_terminated(
+        self, process: Process, pid: int, max_retries: int = 3
+    ) -> None:
+        """
+        Check if process has terminated and clean up.
+
+        Args:
+            process: The process to check
+            pid: Process ID
+            max_retries: Maximum recursion attempts to prevent infinite loops
+        """
+        # Check if process still exists in our tracking
+        async with self.process_ownership_lock:
+            if pid not in self.process_ownership:
+                return
+
         try:
             await asyncio.wait_for(process.wait(), timeout=10)
         except Exception:
             pass
-        if process.returncode is None:
-            kill_subprocess_sync(process, self.logger)
-            return await self.check_terminated(process, pid)
 
-        if pid not in self.process_ownership:
-            return
+        # If process still hasn't terminated and we have retries left
+        if process.returncode is None and max_retries > 0:
+            kill_subprocess_sync(process, self.logger)
+            # Wait a bit before recursing to allow process to actually terminate
+            await asyncio.sleep(0.1)
+            return await self.check_terminated(process, pid, max_retries - 1)
+
+        # If process still hasn't terminated after max retries, log warning
+        if process.returncode is None:
+            self.logger.warning(
+                f"Process {pid} could not be terminated after {3} attempts"
+            )
+            # Force set returncode to prevent further attempts
+            process.returncode = -1
+
+        # Clean up from process ownership
         async with self.process_ownership_lock:
-            del self.process_ownership[pid]
+            if pid in self.process_ownership:
+                del self.process_ownership[pid]
 
     async def kill_all_subprocesses(self) -> None:
         self.logger.info("Killing all subprocesses...")
@@ -344,7 +385,9 @@ class SubprocessMonitor:
         o_SUBPROCESS_MONITOR_PID = os.getenv("SUBPROCESS_MONITOR_PID")
         o_SUBPROCESS_MONITOR_HOST = os.getenv("SUBPROCESS_MONITOR_HOST")
         try:
-            self.logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
+            self.logger.info(
+                "Starting subprocess manager on %s:%d...", self.host, self.port
+            )
             await runner.setup()
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
@@ -453,8 +496,12 @@ class SubprocessMonitor:
         """
         Check if any of the subprocesses have terminated and clean up
         """
+        # Fix: Use proper locking to prevent race conditions
+        async with self.process_ownership_lock:
+            # Create a copy of the items to avoid "dictionary changed size during iteration"
+            process_items = list(self.process_ownership.items())
 
-        for pid, process in list(self.process_ownership.items()):
+        for pid, process in process_items:
             try:
                 if psutil.pid_exists(pid):
                     proc_status = psutil.Process(pid).status()
@@ -464,16 +511,32 @@ class SubprocessMonitor:
 
             except psutil.NoSuchProcess:
                 pass
-            
-            self.logger.info("Process %d is not running (%d)", pid, process.returncode or 0)
+
+            self.logger.info(
+                "Process %d is not running (%d)", pid, process.returncode or 0
+            )
             await self.stop_subprocess(process, pid)
 
+        # Clean up WebSocket subscriptions for terminated processes
         async with self.subscription_lock:
-            for pid, subs in list(self.subscriptions.items()):
-                if pid not in self.process_ownership:
-                    for ws in subs:
-                        await ws.close()
-                    del self.subscriptions[pid]
+            # Create a copy to avoid race condition
+            subscription_items = list(self.subscriptions.items())
+
+        for pid, subs in subscription_items:
+            # Check if process still exists under lock
+            async with self.process_ownership_lock:
+                process_exists = pid in self.process_ownership
+
+            if not process_exists:
+                async with self.subscription_lock:
+                    # Double-check inside lock to prevent race condition
+                    if pid in self.subscriptions:
+                        for ws in self.subscriptions[pid]:
+                            try:
+                                await ws.close()
+                            except Exception as e:
+                                self.logger.warning(f"Error closing WebSocket: {e}")
+                        del self.subscriptions[pid]
 
     def __await__(self):
         return self.run().__await__()
