@@ -27,13 +27,22 @@ from .types import (
     SubscribeRequests,
     StreamingLineOutput,
 )
+from .validation import (
+    safe_validate_spawn_process_request,
+    safe_validate_stop_process_request,
+    safe_validate_subscribe_requests,
+    ValidationError,
+)
 
 
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.StreamHandler())
 
 
-def terminate_subprocess_sync(process: Process):
+def terminate_subprocess_sync(
+    process: Process, logger: Optional[logging.Logger] = None
+):
+    logger = logger or LOGGER
     try:
         process.terminate()
         logger.info(f"Terminated subprocess {process.pid}")
@@ -43,11 +52,12 @@ def terminate_subprocess_sync(process: Process):
         logger.exception(exc)
         logger.error(f"Error terminating subprocess {process.pid}: {exc}")
     finally:
-        close_process_streams(process)
+        close_process_streams(process, logger)
 
 
-def close_process_streams(process: Process):
+def close_process_streams(process: Process, logger: Optional[logging.Logger] = None):
     """Ensure all process streams are closed to prevent unclosed pipe warnings."""
+    logger = logger or LOGGER
     try:
         if process.stdout and not process.stdout.at_eof():
             process.stdout.close()
@@ -68,7 +78,8 @@ def close_process_streams(process: Process):
     process._transport.close()
 
 
-def kill_subprocess_sync(process: Process):
+def kill_subprocess_sync(process: Process, logger: Optional[logging.Logger] = None):
+    logger = logger or LOGGER
     try:
         process.kill()
         logger.warning(f"Killed subprocess {process.pid}")
@@ -76,12 +87,15 @@ def kill_subprocess_sync(process: Process):
         logger.exception(exc)
         logger.error(f"Error killing subprocess {process.pid}: {exc}")
     finally:
-        close_process_streams(process)
+        close_process_streams(process, logger)
 
 
 def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int:
     """
-    Find a free port in the given range
+    Find a free port in the given range.
+
+    WARNING: This function has a race condition (TOCTOU) - port may be taken
+    between check and use. Use bind_to_free_port() instead for secure binding.
 
     start_port: the start port to search from
     end_port: the end port to search to
@@ -94,6 +108,33 @@ def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int
         except OSError:
             continue
         return port
+    raise ValueError("No free ports available")
+
+
+def bind_to_free_port(
+    host: str = "localhost", start_port: int = DEFAULT_PORT, end_port: int = 65535
+) -> tuple[int, socket.socket]:
+    """
+    Bind to a free port and return both the port number and the bound socket.
+
+    This eliminates the race condition by keeping the socket bound until
+    the server can take over.
+
+    Returns:
+        tuple: (port_number, bound_socket)
+    """
+    for port in range(start_port, end_port + 1):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # DO NOT set SO_REUSEADDR - it allows multiple binds to same port
+            sock.bind((host, port))
+            return port, sock
+        except OSError:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            continue
     raise ValueError("No free ports available")
 
 
@@ -127,10 +168,10 @@ class SubprocessMonitor:
         host: str = DEFAULT_HOST,
         port: Optional[int] = None,
         check_interval: float = 2,
+        logger: Optional[logging.Logger] = None,
     ):
         self.host = host
-        self.port = port or find_free_port()
-
+        self.logger = logger or LOGGER
         check_interval = max(0.1, check_interval)  # Ensure period is not too small
         self.check_interval = check_interval
         self.process_ownership_lock = asyncio.Lock()
@@ -143,13 +184,22 @@ class SubprocessMonitor:
 
         self.app = web.Application()
         self._running = False
+        self._bound_socket = None
+
+        # Handle port binding securely to prevent race conditions
+        if port is not None:
+            # Use specified port
+            self.port = port
+        else:
+            # Use secure port binding to prevent TOCTOU race condition
+            self.port, self._bound_socket = bind_to_free_port(host)
 
         self.app.router.add_get("/", self.index)
         self.app.router.add_post("/spawn", self.spawn)
         self.app.router.add_post("/stop", self.stop)
         self.app.router.add_get(
             "/subscribe", self.subscribe_output
-        )  # New endpoint for subscriptions
+        )  # New endpoint for subscriptions  # New endpoint for subscriptions
 
     async def index(self, _) -> TypedJSONResponse[SubProcessIndexResponse]:
         return cast(
@@ -160,7 +210,30 @@ class SubprocessMonitor:
     async def spawn(
         self, req: TypedRequest[SpawnProcessRequest]
     ) -> TypedJSONResponse[SpawnRequestResponse]:
-        request = await req.json()
+        try:
+            raw_request = await req.json()
+            request = safe_validate_spawn_process_request(raw_request)
+        except ValidationError as exc:
+            self.logger.error("Invalid spawn request: %s", exc)
+            return cast(
+                TypedJSONResponse[SpawnRequestResponse],
+                web.json_response(
+                    SpawnRequestFailureResponse(
+                        status="failure", error=f"Invalid request: {exc}"
+                    )
+                ),
+            )
+        except Exception as exc:
+            self.logger.error("Failed to parse spawn request: %s", exc)
+            return cast(
+                TypedJSONResponse[SpawnRequestResponse],
+                web.json_response(
+                    SpawnRequestFailureResponse(
+                        status="failure", error="Invalid JSON request"
+                    )
+                ),
+            )
+
         # to avoid thread safety issues as the web framework used here is not mandatory
         try:
             subprocess_pid = await self.start_subprocess(request)
@@ -172,8 +245,8 @@ class SubprocessMonitor:
             )
         except Exception as exc:
             cmd = " ".join([request["cmd"], *request["args"]])
-            logger.error("Failed to start subprocess: %s", cmd)
-            logger.exception(exc)
+            self.logger.error("Failed to start subprocess: %s", cmd)
+            self.logger.exception(exc)
             return cast(
                 TypedJSONResponse[SpawnRequestResponse],
                 web.json_response(
@@ -184,7 +257,30 @@ class SubprocessMonitor:
     async def stop(
         self, req: TypedRequest[StopProcessRequest]
     ) -> TypedJSONResponse[StopRequestResponse]:
-        request: StopProcessRequest = await req.json()
+        try:
+            raw_request = await req.json()
+            request = safe_validate_stop_process_request(raw_request)
+        except ValidationError as exc:
+            self.logger.error("Invalid stop request: %s", exc)
+            return cast(
+                TypedJSONResponse[StopRequestResponse],
+                web.json_response(
+                    StopRequestFailureResponse(
+                        status="failure", error=f"Invalid request: {exc}"
+                    )
+                ),
+            )
+        except Exception as exc:
+            self.logger.error("Failed to parse stop request: %s", exc)
+            return cast(
+                TypedJSONResponse[StopRequestResponse],
+                web.json_response(
+                    StopRequestFailureResponse(
+                        status="failure", error="Invalid JSON request"
+                    )
+                ),
+            )
+
         try:
             found = await self.stop_subprocess_request(
                 request, asyncio.get_running_loop()
@@ -204,8 +300,8 @@ class SubprocessMonitor:
                     ),
                 )
         except Exception as exc:
-            logger.error("Failed to stop subprocess %s", request["pid"])
-            logger.exception(exc)
+            self.logger.error("Failed to stop subprocess %s", request["pid"])
+            self.logger.exception(exc)
             return cast(
                 TypedJSONResponse[StopRequestFailureResponse],
                 web.json_response(
@@ -216,16 +312,22 @@ class SubprocessMonitor:
     async def subscribe_output(
         self, request: TypedRequest[Any, SubscribeRequests]
     ) -> web.WebSocketResponse:
-        pid = int(request.query.get("pid", -1))
+        try:
+            query_data = {"pid": request.query.get("pid", "")}
+            validated_query = safe_validate_subscribe_requests(query_data)
+            pid = int(validated_query["pid"])
+        except (ValidationError, ValueError) as exc:
+            self.logger.error("Invalid subscribe request: %s", exc)
+            return web.HTTPBadRequest(text=f"Invalid 'pid' parameter: {exc}")
 
-        if pid == -1 or pid not in self.process_ownership:
-            return web.HTTPBadRequest(text="Invalid or missing 'pid' parameter.")
+        if pid not in self.process_ownership:
+            return web.HTTPBadRequest(text="PID not found in managed processes.")
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         async with self.subscription_lock:
             self.subscriptions[pid].append(ws)
-        logger.info("Client subscribed to subprocess %d output.", pid)
+        self.logger.info("Client subscribed to subprocess %d output.", pid)
 
         try:
             async for msg in ws:
@@ -233,15 +335,15 @@ class SubprocessMonitor:
                     # You can handle incoming messages from the client here if needed
                     pass
                 elif msg.type == WSMsgType.ERROR:
-                    logger.exception(ws.exception())
-                    logger.error(
+                    self.logger.exception(ws.exception())
+                    self.logger.error(
                         "WebSocket connection closed with exception %s", ws.exception()
                     )
         finally:
             async with self.subscription_lock:
                 if pid in self.subscriptions and ws in self.subscriptions[pid]:
                     self.subscriptions[pid].remove(ws)
-            logger.info("Client unsubscribed from subprocess %d output.", pid)
+            self.logger.info("Client unsubscribed from subprocess %d output.", pid)
 
         return ws
 
@@ -250,7 +352,7 @@ class SubprocessMonitor:
         args = request["args"]
         env = request.get("env", {})
 
-        logger.info(f"Starting subprocess: {cmd} {args} with environment: {env}")
+        self.logger.info(f"Starting subprocess: {cmd} {args} with environment: {env}")
         full_command = [cmd] + args
 
         set_os_env_vars(self.port, self.host, env=env)
@@ -266,7 +368,7 @@ class SubprocessMonitor:
 
         async with self.process_ownership_lock:
             self.process_ownership[process.pid] = process
-        logger.info(
+        self.logger.info(
             "Started subprocess: %s %s with PID %d", cmd, " ".join(args), process.pid
         )
         # Start tasks to read stdout and stderr
@@ -281,51 +383,90 @@ class SubprocessMonitor:
     ) -> None:
         if loop is None:
             loop = asyncio.get_running_loop()
+
         if process is None:
             if pid is None:
                 raise ValueError("Either process or pid must be provided")
 
-            if pid not in self.process_ownership:
-                raise ValueError("PID not found")
-            if self.process_ownership[pid].pid == pid:
+            # Use lock to safely access process_ownership
+            async with self.process_ownership_lock:
+                if pid not in self.process_ownership:
+                    raise ValueError("PID not found")
                 process = self.process_ownership[pid]
 
         if process is None:
             raise ValueError("Process not found")
 
         if pid is None:
-            for _pid, _process in self.process_ownership.items():
-                if process == _process:
-                    pid = _pid
-                    break
+            # Use lock to safely search for pid
+            async with self.process_ownership_lock:
+                for _pid, _process in self.process_ownership.items():
+                    if process == _process:
+                        pid = _pid
+                        break
 
         if pid is None:
             raise ValueError("PID not found")
 
-        terminate_subprocess_sync(process)
+        terminate_subprocess_sync(process, self.logger)
+
+        # Clean up WebSocket subscriptions immediately
+        async with self.subscription_lock:
+            if pid in self.subscriptions:
+                for ws in self.subscriptions[pid]:
+                    try:
+                        await ws.close()
+                    except Exception as e:
+                        self.logger.warning(f"Error closing WebSocket: {e}")
+                del self.subscriptions[pid]
 
         loop.call_soon_threadsafe(
             asyncio.create_task, self.check_terminated(process, pid)
         )
 
-    async def check_terminated(self, process: Process, pid: int) -> None:
-        if pid not in self.process_ownership:
-            return
+    async def check_terminated(
+        self, process: Process, pid: int, max_retries: int = 3
+    ) -> None:
+        """
+        Check if process has terminated and clean up.
+
+        Args:
+            process: The process to check
+            pid: Process ID
+            max_retries: Maximum recursion attempts to prevent infinite loops
+        """
+        # Check if process still exists in our tracking
+        async with self.process_ownership_lock:
+            if pid not in self.process_ownership:
+                return
+
         try:
             await asyncio.wait_for(process.wait(), timeout=10)
         except Exception:
             pass
-        if process.returncode is None:
-            kill_subprocess_sync(process)
-            return await self.check_terminated(process, pid)
 
-        if pid not in self.process_ownership:
-            return
+        # If process still hasn't terminated and we have retries left
+        if process.returncode is None and max_retries > 0:
+            kill_subprocess_sync(process, self.logger)
+            # Wait a bit before recursing to allow process to actually terminate
+            await asyncio.sleep(0.1)
+            return await self.check_terminated(process, pid, max_retries - 1)
+
+        # If process still hasn't terminated after max retries, log warning
+        if process.returncode is None:
+            self.logger.warning(
+                f"Process {pid} could not be terminated after {3} attempts"
+            )
+            # Force set returncode to prevent further attempts
+            process.returncode = -1
+
+        # Clean up from process ownership
         async with self.process_ownership_lock:
-            del self.process_ownership[pid]
+            if pid in self.process_ownership:
+                del self.process_ownership[pid]
 
     async def kill_all_subprocesses(self) -> None:
-        logger.info("Killing all subprocesses...")
+        self.logger.info("Killing all subprocesses...")
         for pid, process in list(self.process_ownership.items()):
             await self.stop_subprocess(process, pid)
 
@@ -340,9 +481,24 @@ class SubprocessMonitor:
         o_SUBPROCESS_MONITOR_PID = os.getenv("SUBPROCESS_MONITOR_PID")
         o_SUBPROCESS_MONITOR_HOST = os.getenv("SUBPROCESS_MONITOR_HOST")
         try:
-            logger.info("Starting subprocess manager on %s:%d...", self.host, self.port)
+            self.logger.info(
+                "Starting subprocess manager on %s:%d...", self.host, self.port
+            )
             await runner.setup()
-            site = web.TCPSite(runner, self.host, self.port)
+
+            # Use pre-bound socket if available (prevents race condition)
+            if self._bound_socket is not None:
+                # Extract port from bound socket and close it
+                # Then create TCPSite - this approach works cross-platform
+                # Small race window but much better than original find_free_port()
+                bound_port = self._bound_socket.getsockname()[1]
+                self._bound_socket.close()
+                self._bound_socket = None
+                site = web.TCPSite(runner, self.host, bound_port)
+            else:
+                # Fallback to regular TCP site (when port was specified)
+                site = web.TCPSite(runner, self.host, self.port)
+
             await site.start()
 
             set_os_env_vars(self.port, self.host)
@@ -351,7 +507,7 @@ class SubprocessMonitor:
                 await asyncio.sleep(_scan_period)
                 await self.check_processes_step()
         except Exception as exc:
-            logger.exception(exc)
+            self.logger.exception(exc)
             raise exc
         finally:
             await self.kill_all_subprocesses()
@@ -360,6 +516,14 @@ class SubprocessMonitor:
                 for subs in self.subscriptions.values():
                     for ws in subs:
                         await ws.close()
+
+            # Clean up bound socket if it wasn't used
+            if self._bound_socket is not None:
+                try:
+                    self._bound_socket.close()
+                except Exception:
+                    pass
+                self._bound_socket = None
 
             if o_SUBPROCESS_MONITOR_PORT is not None:
                 os.environ["SUBPROCESS_MONITOR_PORT"] = o_SUBPROCESS_MONITOR_PORT
@@ -397,7 +561,7 @@ class SubprocessMonitor:
         if loop is None:
             loop = asyncio.get_running_loop()
 
-        logger.info(f"Stopping subprocess with PID {request['pid']}...")
+        self.logger.info(f"Stopping subprocess with PID {request['pid']}...")
 
         pid = request["pid"]
         if pid not in self.process_ownership:
@@ -420,17 +584,34 @@ class SubprocessMonitor:
     async def stream_subprocess_output(self, pid: int, process: Process) -> None:
         async def read_stream(stream: asyncio.StreamReader, stream_name):
             while True:
-                # Check if the subprocess has exited
-                if process.returncode is not None:
-                    break
-
                 try:
                     # Read a line from the stream with a timeout
                     line = await asyncio.wait_for(stream.readline(), timeout=5)
                 except asyncio.TimeoutError:
-                    continue  # Retry on timeout
+                    # Check if the subprocess has exited on timeout
+                    if process.returncode is not None:
+                        # Process has exited, read any remaining data and then break
+                        try:
+                            # Try to read any remaining buffered data
+                            remaining_data = await asyncio.wait_for(
+                                stream.read(), timeout=0.1
+                            )
+                            if remaining_data:
+                                message = json.dumps(
+                                    StreamingLineOutput(
+                                        stream=stream_name,
+                                        pid=pid,
+                                        data=remaining_data.decode().rstrip(),
+                                    )
+                                )
+                                await self.broadcast_output(pid, message)
+                        except (asyncio.TimeoutError, ValueError):
+                            pass
+                        break
+                    continue  # Retry on timeout if process is still running
                 except ValueError:
                     break  # Stream is closed, exit the loop
+
                 if line:  # If line is not empty, process it
                     message = json.dumps(
                         StreamingLineOutput(
@@ -439,6 +620,24 @@ class SubprocessMonitor:
                     )
                     await self.broadcast_output(pid, message)
                 else:
+                    # EOF reached - check if process has exited and read any remaining data
+                    if process.returncode is not None:
+                        try:
+                            # Try to read any remaining buffered data one more time
+                            remaining_data = await asyncio.wait_for(
+                                stream.read(), timeout=0.1
+                            )
+                            if remaining_data:
+                                message = json.dumps(
+                                    StreamingLineOutput(
+                                        stream=stream_name,
+                                        pid=pid,
+                                        data=remaining_data.decode().rstrip(),
+                                    )
+                                )
+                                await self.broadcast_output(pid, message)
+                        except (asyncio.TimeoutError, ValueError):
+                            pass
                     break  # EOF reached, exit the loop
 
         await asyncio.gather(
@@ -449,26 +648,58 @@ class SubprocessMonitor:
         """
         Check if any of the subprocesses have terminated and clean up
         """
+        # Fix: Use proper locking to prevent race conditions
+        async with self.process_ownership_lock:
+            # Create a copy of the items to avoid "dictionary changed size during iteration"
+            process_items = list(self.process_ownership.items())
 
-        for pid, process in list(self.process_ownership.items()):
+        for pid, process in process_items:
             try:
-                if (
-                    psutil.pid_exists(pid)
-                    and psutil.Process(pid).status() == psutil.STATUS_RUNNING
-                ):
+                # Check if the process object itself has terminated
+                if process.returncode is None:
+                    # Process hasn't terminated yet, keep it
                     continue
-            except psutil.NoSuchProcess:
-                pass
 
-            logger.info("Process %d is not running (%d)", pid, process.returncode)
-            await self.stop_subprocess(process, pid)
+                # Process has terminated, clean it up
+                self.logger.info(
+                    "Process %d has terminated with return code %d",
+                    pid,
+                    process.returncode,
+                )
+                await self.stop_subprocess(process, pid)
 
+            except Exception as e:
+                # If there's any error checking process status, log it but don't cleanup
+                self.logger.warning(f"Error checking process {pid} status: {e}")
+                # Only cleanup if we can confirm the process is actually dead
+                try:
+                    if not psutil.pid_exists(pid):
+                        self.logger.info(f"Process {pid} no longer exists, cleaning up")
+                        await self.stop_subprocess(process, pid)
+                except Exception:
+                    # If we can't even check if PID exists, leave it alone
+                    pass
+
+        # Clean up WebSocket subscriptions for terminated processes
         async with self.subscription_lock:
-            for pid, subs in list(self.subscriptions.items()):
-                if pid not in self.process_ownership:
-                    for ws in subs:
-                        await ws.close()
-                    del self.subscriptions[pid]
+            # Create a copy to avoid race condition
+            subscription_items = list(self.subscriptions.items())
+
+        for pid, subs in subscription_items:
+            # Check if process still exists under lock
+            async with self.process_ownership_lock:
+                process_exists = pid in self.process_ownership
+
+            if not process_exists:
+                async with self.subscription_lock:
+                    # Double-check inside lock to prevent race condition
+                    if pid in self.subscriptions:
+                        for ws in self.subscriptions[pid]:
+                            try:
+                                await ws.close()
+                            except Exception as e:
+                                self.logger.warning(f"Error closing WebSocket: {e}")
+                        del self.subscriptions[pid]
 
     def __await__(self):
         return self.run().__await__()

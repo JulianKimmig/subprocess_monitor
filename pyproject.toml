@@ -1,25 +1,26 @@
-[tool.poetry]
+[project]
 name = "subprocess-monitor"
-version = "0.2.6"
+version = "0.3.0"
 description = "A service to manage monitor and spawn subprocess"
-authors = ["JulianKimmig <julian.kimmig@gmx.net>"]
-license = "MIT"
+authors = [{name = "JulianKimmig", email = "julian.kimmig@gmx.net"}]
+license = {text = "MIT"}
 readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp",
+    "psutil",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.9"
-aiohttp = "*"
-psutil = "*"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.3.3"
-pre-commit = "^4.0.1"
-
+[dependency-groups]
+dev = [
+    "pytest>=8.3.3",
+    "pre-commit>=4.0.1",
+]
 
 [tool.vulture]
 min_confidence = 80
 paths = ["subprocess_monitor"]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
