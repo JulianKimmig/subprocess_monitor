@@ -13,7 +13,7 @@ import os
 
 from subprocess_monitor.subprocess_monitor import (
     SubprocessMonitor,
-    find_free_port,
+    bind_to_free_port,
 )
 from subprocess_monitor.helper import (
     send_spawn_request,
@@ -148,7 +148,10 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
     def _spwan_new_manager(self):
         time.sleep(1)
-        port = find_free_port()
+        # Use bind_to_free_port to avoid race condition
+        port, sock = bind_to_free_port(host=self.host)
+        # Close the socket immediately so the subprocess can bind to it
+        sock.close()
 
         add_kwargs = {}
 
