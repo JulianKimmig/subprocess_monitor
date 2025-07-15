@@ -81,6 +81,9 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertEqual(response.get("status"), "success", response)
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
+
+        # Allow brief time for process to be added to ownership tracking
+        await asyncio.sleep(0.1)
         self.assertIn(pid, self.monitor.process_ownership)
 
         # Wait briefly to allow subprocess to finish

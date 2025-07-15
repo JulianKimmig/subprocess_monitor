@@ -27,6 +27,12 @@ from .types import (
     SubscribeRequests,
     StreamingLineOutput,
 )
+from .validation import (
+    safe_validate_spawn_process_request,
+    safe_validate_stop_process_request,
+    safe_validate_subscribe_requests,
+    ValidationError,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -204,7 +210,30 @@ class SubprocessMonitor:
     async def spawn(
         self, req: TypedRequest[SpawnProcessRequest]
     ) -> TypedJSONResponse[SpawnRequestResponse]:
-        request = await req.json()
+        try:
+            raw_request = await req.json()
+            request = safe_validate_spawn_process_request(raw_request)
+        except ValidationError as exc:
+            self.logger.error("Invalid spawn request: %s", exc)
+            return cast(
+                TypedJSONResponse[SpawnRequestResponse],
+                web.json_response(
+                    SpawnRequestFailureResponse(
+                        status="failure", error=f"Invalid request: {exc}"
+                    )
+                ),
+            )
+        except Exception as exc:
+            self.logger.error("Failed to parse spawn request: %s", exc)
+            return cast(
+                TypedJSONResponse[SpawnRequestResponse],
+                web.json_response(
+                    SpawnRequestFailureResponse(
+                        status="failure", error="Invalid JSON request"
+                    )
+                ),
+            )
+
         # to avoid thread safety issues as the web framework used here is not mandatory
         try:
             subprocess_pid = await self.start_subprocess(request)
@@ -228,7 +257,30 @@ class SubprocessMonitor:
     async def stop(
         self, req: TypedRequest[StopProcessRequest]
     ) -> TypedJSONResponse[StopRequestResponse]:
-        request: StopProcessRequest = await req.json()
+        try:
+            raw_request = await req.json()
+            request = safe_validate_stop_process_request(raw_request)
+        except ValidationError as exc:
+            self.logger.error("Invalid stop request: %s", exc)
+            return cast(
+                TypedJSONResponse[StopRequestResponse],
+                web.json_response(
+                    StopRequestFailureResponse(
+                        status="failure", error=f"Invalid request: {exc}"
+                    )
+                ),
+            )
+        except Exception as exc:
+            self.logger.error("Failed to parse stop request: %s", exc)
+            return cast(
+                TypedJSONResponse[StopRequestResponse],
+                web.json_response(
+                    StopRequestFailureResponse(
+                        status="failure", error="Invalid JSON request"
+                    )
+                ),
+            )
+
         try:
             found = await self.stop_subprocess_request(
                 request, asyncio.get_running_loop()
@@ -260,10 +312,16 @@ class SubprocessMonitor:
     async def subscribe_output(
         self, request: TypedRequest[Any, SubscribeRequests]
     ) -> web.WebSocketResponse:
-        pid = int(request.query.get("pid", -1))
+        try:
+            query_data = {"pid": request.query.get("pid", "")}
+            validated_query = safe_validate_subscribe_requests(query_data)
+            pid = int(validated_query["pid"])
+        except (ValidationError, ValueError) as exc:
+            self.logger.error("Invalid subscribe request: %s", exc)
+            return web.HTTPBadRequest(text=f"Invalid 'pid' parameter: {exc}")
 
-        if pid == -1 or pid not in self.process_ownership:
-            return web.HTTPBadRequest(text="Invalid or missing 'pid' parameter.")
+        if pid not in self.process_ownership:
+            return web.HTTPBadRequest(text="PID not found in managed processes.")
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -430,9 +488,13 @@ class SubprocessMonitor:
 
             # Use pre-bound socket if available (prevents race condition)
             if self._bound_socket is not None:
-                site = web.SockSite(runner, self._bound_socket)
-                # Close the bound socket reference since aiohttp will manage it now
+                # Extract port from bound socket and close it
+                # Then create TCPSite - this approach works cross-platform
+                # Small race window but much better than original find_free_port()
+                bound_port = self._bound_socket.getsockname()[1]
+                self._bound_socket.close()
                 self._bound_socket = None
+                site = web.TCPSite(runner, self.host, bound_port)
             else:
                 # Fallback to regular TCP site (when port was specified)
                 site = web.TCPSite(runner, self.host, self.port)
@@ -522,17 +584,34 @@ class SubprocessMonitor:
     async def stream_subprocess_output(self, pid: int, process: Process) -> None:
         async def read_stream(stream: asyncio.StreamReader, stream_name):
             while True:
-                # Check if the subprocess has exited
-                if process.returncode is not None:
-                    break
-
                 try:
                     # Read a line from the stream with a timeout
                     line = await asyncio.wait_for(stream.readline(), timeout=5)
                 except asyncio.TimeoutError:
-                    continue  # Retry on timeout
+                    # Check if the subprocess has exited on timeout
+                    if process.returncode is not None:
+                        # Process has exited, read any remaining data and then break
+                        try:
+                            # Try to read any remaining buffered data
+                            remaining_data = await asyncio.wait_for(
+                                stream.read(), timeout=0.1
+                            )
+                            if remaining_data:
+                                message = json.dumps(
+                                    StreamingLineOutput(
+                                        stream=stream_name,
+                                        pid=pid,
+                                        data=remaining_data.decode().rstrip(),
+                                    )
+                                )
+                                await self.broadcast_output(pid, message)
+                        except (asyncio.TimeoutError, ValueError):
+                            pass
+                        break
+                    continue  # Retry on timeout if process is still running
                 except ValueError:
                     break  # Stream is closed, exit the loop
+
                 if line:  # If line is not empty, process it
                     message = json.dumps(
                         StreamingLineOutput(
@@ -541,6 +620,24 @@ class SubprocessMonitor:
                     )
                     await self.broadcast_output(pid, message)
                 else:
+                    # EOF reached - check if process has exited and read any remaining data
+                    if process.returncode is not None:
+                        try:
+                            # Try to read any remaining buffered data one more time
+                            remaining_data = await asyncio.wait_for(
+                                stream.read(), timeout=0.1
+                            )
+                            if remaining_data:
+                                message = json.dumps(
+                                    StreamingLineOutput(
+                                        stream=stream_name,
+                                        pid=pid,
+                                        data=remaining_data.decode().rstrip(),
+                                    )
+                                )
+                                await self.broadcast_output(pid, message)
+                        except (asyncio.TimeoutError, ValueError):
+                            pass
                     break  # EOF reached, exit the loop
 
         await asyncio.gather(
