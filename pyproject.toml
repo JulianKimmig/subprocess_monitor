@@ -1,6 +1,6 @@
 [project]
 name = "subprocess-monitor"
-version = "0.2.6"
+version = "0.3.0"
 description = "A service to manage monitor and spawn subprocess"
 authors = [{name = "JulianKimmig", email = "julian.kimmig@gmx.net"}]
 license = {text = "MIT"}
