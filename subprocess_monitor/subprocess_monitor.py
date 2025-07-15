@@ -86,7 +86,10 @@ def kill_subprocess_sync(process: Process, logger: Optional[logging.Logger] = No
 
 def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int:
     """
-    Find a free port in the given range
+    Find a free port in the given range.
+
+    WARNING: This function has a race condition (TOCTOU) - port may be taken
+    between check and use. Use bind_to_free_port() instead for secure binding.
 
     start_port: the start port to search from
     end_port: the end port to search to
@@ -99,6 +102,33 @@ def find_free_port(start_port: int = DEFAULT_PORT, end_port: int = 65535) -> int
         except OSError:
             continue
         return port
+    raise ValueError("No free ports available")
+
+
+def bind_to_free_port(
+    host: str = "localhost", start_port: int = DEFAULT_PORT, end_port: int = 65535
+) -> tuple[int, socket.socket]:
+    """
+    Bind to a free port and return both the port number and the bound socket.
+
+    This eliminates the race condition by keeping the socket bound until
+    the server can take over.
+
+    Returns:
+        tuple: (port_number, bound_socket)
+    """
+    for port in range(start_port, end_port + 1):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # DO NOT set SO_REUSEADDR - it allows multiple binds to same port
+            sock.bind((host, port))
+            return port, sock
+        except OSError:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            continue
     raise ValueError("No free ports available")
 
 
@@ -135,7 +165,6 @@ class SubprocessMonitor:
         logger: Optional[logging.Logger] = None,
     ):
         self.host = host
-        self.port = port or find_free_port()
         self.logger = logger or LOGGER
         check_interval = max(0.1, check_interval)  # Ensure period is not too small
         self.check_interval = check_interval
@@ -149,13 +178,22 @@ class SubprocessMonitor:
 
         self.app = web.Application()
         self._running = False
+        self._bound_socket = None
+
+        # Handle port binding securely to prevent race conditions
+        if port is not None:
+            # Use specified port
+            self.port = port
+        else:
+            # Use secure port binding to prevent TOCTOU race condition
+            self.port, self._bound_socket = bind_to_free_port(host)
 
         self.app.router.add_get("/", self.index)
         self.app.router.add_post("/spawn", self.spawn)
         self.app.router.add_post("/stop", self.stop)
         self.app.router.add_get(
             "/subscribe", self.subscribe_output
-        )  # New endpoint for subscriptions
+        )  # New endpoint for subscriptions  # New endpoint for subscriptions
 
     async def index(self, _) -> TypedJSONResponse[SubProcessIndexResponse]:
         return cast(
@@ -389,7 +427,16 @@ class SubprocessMonitor:
                 "Starting subprocess manager on %s:%d...", self.host, self.port
             )
             await runner.setup()
-            site = web.TCPSite(runner, self.host, self.port)
+
+            # Use pre-bound socket if available (prevents race condition)
+            if self._bound_socket is not None:
+                site = web.SockSite(runner, self._bound_socket)
+                # Close the bound socket reference since aiohttp will manage it now
+                self._bound_socket = None
+            else:
+                # Fallback to regular TCP site (when port was specified)
+                site = web.TCPSite(runner, self.host, self.port)
+
             await site.start()
 
             set_os_env_vars(self.port, self.host)
@@ -407,6 +454,14 @@ class SubprocessMonitor:
                 for subs in self.subscriptions.values():
                     for ws in subs:
                         await ws.close()
+
+            # Clean up bound socket if it wasn't used
+            if self._bound_socket is not None:
+                try:
+                    self._bound_socket.close()
+                except Exception:
+                    pass
+                self._bound_socket = None
 
             if o_SUBPROCESS_MONITOR_PORT is not None:
                 os.environ["SUBPROCESS_MONITOR_PORT"] = o_SUBPROCESS_MONITOR_PORT
