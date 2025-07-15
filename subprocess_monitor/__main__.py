@@ -134,16 +134,42 @@ def main():
     elif args.command == "spawn":
         command = args.cmd
         spawn_args = args.cmd_args
-        env = dict(var.split("=", 1) for var in args.env) if args.env else {}
-        asyncio.run(send_spawn_request(command, spawn_args, env, args.port))
+
+        # Parse and validate environment variables
+        env = {}
+        if args.env:
+            for var in args.env:
+                if not var or "=" not in var:
+                    logger.error(
+                        f"Invalid environment variable format: '{var}'. Expected KEY=VALUE format."
+                    )
+                    return 1
+
+                key, value = var.split("=", 1)
+
+                # Validate environment variable name (no spaces, valid identifier-like format)
+                if (
+                    not key
+                    or " " in key
+                    or not key.replace("_", "").replace("-", "").isalnum()
+                ):
+                    logger.error(
+                        f"Invalid environment variable name: '{key}'."
+                        " Names cannot contain spaces or special characters."
+                    )
+                    return 1
+
+                env[key] = value
+
+        asyncio.run(send_spawn_request(command, spawn_args, env, args.host, args.port))
 
     elif args.command == "stop":
-        asyncio.run(send_stop_request(args.pid, args.port))
+        asyncio.run(send_stop_request(args.pid, args.host, args.port))
 
     elif args.command == "status":
-        asyncio.run(get_status(args.port))
+        asyncio.run(get_status(args.host, args.port))
     elif args.command == "subscribe":
-        asyncio.run(subscribe(args.pid, args.port))
+        asyncio.run(subscribe(args.pid, args.host, args.port))
 
     else:
         parser.print_help()
