@@ -655,19 +655,30 @@ class SubprocessMonitor:
 
         for pid, process in process_items:
             try:
-                if psutil.pid_exists(pid):
-                    proc_status = psutil.Process(pid).status()
-                    # Only terminate if process is actually dead (zombie/dead), not just sleeping/idle
-                    if proc_status not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
-                        continue
+                # Check if the process object itself has terminated
+                if process.returncode is None:
+                    # Process hasn't terminated yet, keep it
+                    continue
 
-            except psutil.NoSuchProcess:
-                pass
+                # Process has terminated, clean it up
+                self.logger.info(
+                    "Process %d has terminated with return code %d",
+                    pid,
+                    process.returncode,
+                )
+                await self.stop_subprocess(process, pid)
 
-            self.logger.info(
-                "Process %d is not running (%d)", pid, process.returncode or 0
-            )
-            await self.stop_subprocess(process, pid)
+            except Exception as e:
+                # If there's any error checking process status, log it but don't cleanup
+                self.logger.warning(f"Error checking process {pid} status: {e}")
+                # Only cleanup if we can confirm the process is actually dead
+                try:
+                    if not psutil.pid_exists(pid):
+                        self.logger.info(f"Process {pid} no longer exists, cleaning up")
+                        await self.stop_subprocess(process, pid)
+                except Exception:
+                    # If we can't even check if PID exists, leave it alone
+                    pass
 
         # Clean up WebSocket subscriptions for terminated processes
         async with self.subscription_lock:

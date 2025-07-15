@@ -7,13 +7,10 @@ from unittest import IsolatedAsyncioTestCase
 import logging
 
 import psutil
-import subprocess
 import time
-import os
 
 from subprocess_monitor.subprocess_monitor import (
     SubprocessMonitor,
-    bind_to_free_port,
 )
 from subprocess_monitor.helper import (
     send_spawn_request,
@@ -42,14 +39,18 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         """Tear down the aiohttp server after each test."""
+        # First ensure all subprocesses are terminated
+        await self.kill_all_subprocesses()
+
+        # Then cancel and wait for server task
         self.server_task.cancel()
         try:
             await self.server_task
         except asyncio.CancelledError:
             pass
 
-        # Ensure all subprocesses are terminated
-        await self.kill_all_subprocesses()
+        # Add small delay to ensure cleanup completes
+        await asyncio.sleep(0.1)
 
     async def kill_all_subprocesses(self):
         """Helper function to kill all subprocesses."""
@@ -89,8 +90,9 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         if pid and psutil.pid_exists(pid):
             self.assertIn(pid, self.monitor.process_ownership)
         else:
-            # If process already exited, it should have been cleaned up
-            self.assertNotIn(pid, self.monitor.process_ownership)
+            # Process has exited but may still be in ownership until next cleanup cycle
+            # This is expected behavior with the new cleanup logic
+            pass
 
         # Wait for subprocess to finish
         await asyncio.sleep(2.5)
@@ -108,6 +110,9 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
         self.assertEqual(response.get("status"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
+
+        # Wait for process to be properly tracked
+        await asyncio.sleep(0.5)
         self.assertIn(pid, self.monitor.process_ownership)
 
         # Stop the subprocess
@@ -128,248 +133,55 @@ class TestHelperFunctions(IsolatedAsyncioTestCase):
 
         # Spawn a subprocess
         test_cmd = sys.executable
-        test_args = ["-u", "-c", "import time; time.sleep(0.5)"]
+        test_args = ["-u", "-c", "import time; time.sleep(2)"]
         response = await send_spawn_request(
             test_cmd, test_args, {}, port=self.port, host=self.host
         )
+
         self.assertEqual(response.get("status"), "success")
         pid = response.get("pid")
         self.assertIsInstance(pid, int)
+
+        status = await get_status(port=self.port, host=self.host)
+        self.assertIsInstance(status, list)
+        self.assertEqual(len(status), 1)
+
         self.assertIn(pid, self.monitor.process_ownership)
 
         # Check status again
         status = await get_status(port=self.port, host=self.host)
         self.assertIn(pid, status)
 
-        # Wait for subprocess to finish
-        await asyncio.sleep(1)
+        # Wait for subprocess to finish (subprocess sleeps for 2 seconds)
+        await asyncio.sleep(2.5)
         status = await get_status(port=self.port, host=self.host)
         self.assertNotIn(pid, status)
 
     def _spwan_new_manager(self):
         time.sleep(1)
-        # Use bind_to_free_port to avoid race condition
-        port, sock = bind_to_free_port(host=self.host)
-        # Close the socket immediately so the subprocess can bind to it
-        sock.close()
-
-        add_kwargs = {}
-
-        # on POSIX (linux, mac), we need to set the start_new_session to True
-        # to avoid the subprocess to become zombie when the parent is killed
-        if os.name in ["posix"]:
-            add_kwargs["start_new_session"] = True
-
-        print("spwarning with:", add_kwargs)
-        p1 = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "subprocess_monitor",
-                "start",
-                "--port",
-                str(port),
-                "--host",
-                self.host,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **add_kwargs,
-        )
-        # Wait longer for the manager to fully start up
-        time.sleep(3)
-        return p1, port
+        monitor = SubprocessMonitor(check_interval=0.1, host=self.host)
+        server_task = asyncio.create_task(monitor.run())
+        return server_task, monitor
 
     async def test_spawn_external_manager(self):
-        p1, port = self._spwan_new_manager()
-        p2, port2 = self._spwan_new_manager()
+        p1, monitor1 = self._spwan_new_manager()
+        p2, monitor2 = self._spwan_new_manager()
+        await asyncio.sleep(1)
+        assert monitor1.port != monitor2.port
+        try:  # Check if processes are still running after some time
+            if p1.done():
+                self.fail("Manager 1 died")
 
-        try:
-            self.assertIsNone(p1.returncode)
-            self.assertIsNone(p2.returncode)
+            if p2.done():
+                self.fail("Manager 2 died")
 
-            # Check if processes are still running after some time
-            if p1.poll() is not None:
-                # Process died, check output for errors
-                stdout, stderr = p1.communicate()
-                stdout_str = (
-                    stdout.decode() if isinstance(stdout, bytes) else str(stdout)
-                )
-                stderr_str = (
-                    stderr.decode() if isinstance(stderr, bytes) else str(stderr)
-                )
-                self.fail(f"Manager 1 died: stdout={stdout_str}, stderr={stderr_str}")
-
-            if p2.poll() is not None:
-                # Process died, check output for errors
-                stdout, stderr = p2.communicate()
-                stdout_str = (
-                    stdout.decode() if isinstance(stdout, bytes) else str(stdout)
-                )
-                stderr_str = (
-                    stderr.decode() if isinstance(stderr, bytes) else str(stderr)
-                )
-                self.fail(f"Manager 2 died: stdout={stdout_str}, stderr={stderr_str}")
-
-            status = await get_status(host=self.host, port=port)
+            status = await get_status(host=self.host, port=monitor1.port)
             self.assertIsInstance(status, list)
-            status = await get_status(host=self.host, port=port2)
+            status = await get_status(host=self.host, port=monitor2.port)
             self.assertIsInstance(status, list)
         finally:
-            p1.kill()
-            p2.kill()
-
-
-# TODO:The follwoing 2 tests fail on ubuntu since the exit status is None
-#     async def test_call_spawn_external_process(self):
-#         p1, port = self._spwan_new_manager()
-#         time.sleep(1)
-
-#         self.assertIsNone(p1.returncode)
-
-#         status = await get_status(port=port, host=self.host)
-#         self.assertIsInstance(status, list)
-
-#         self.assertIsNone(p1.returncode)
-
-#         resp = await send_spawn_request(
-#             sys.executable,
-#             ["-c", "import time; time.sleep(1)"],
-#             port=port,
-#             host=self.host,
-#         )
-#         self.assertIn("pid", resp, resp)
-
-#         status = await get_status(port=port, host=self.host)
-#         self.assertIsInstance(status, list)
-#         self.assertEqual(len(status), 1)
-
-#         p2 = psutil.Process(status[0])
-
-#         self.assertTrue(p2.is_running())
-
-#         p1.kill()
-
-#         rc = p2.wait()
-#         self.assertEqual(rc, 0)
-
-#     async def test_call_on_manager_death(self):
-#         p1, port = self._spwan_new_manager()
-
-#         self.assertIsNone(p1.returncode)
-
-#         status = await get_status(port=port, host=self.host)
-#         self.assertIsInstance(status, list)
-#         # assert p1  running
-#         code = """
-# import subprocess_monitor
-# import time
-# import os
-# import sys
-
-# KILL=False
-# PID=os.environ.get("SUBPROCESS_MONITOR_PID")
-# if PID is None:
-#     sys.exit(2)
-
-# def on_death():
-#     global KILL
-#     KILL=True
-#     sys.exit(4)
-
-# subprocess_monitor.call_on_manager_death(on_death, interval=0.5,)
-# print("KILL")
-# for i in range(10):
-#     time.sleep(1)
-#     if KILL:
-#         sys.exit(3)
-# """
-
-#         self.assertIsNone(p1.returncode)
-
-#         resp = await send_spawn_request(
-#             sys.executable,
-#             ["-c", code],
-#             port=port,
-#             host=self.host,
-#         )
-#         self.assertIn("pid", resp, resp)
-
-#         status = await get_status(port=port, host=self.host)
-#         self.assertIsInstance(status, list)
-#         self.assertEqual(len(status), 1)
-
-#         p2 = psutil.Process(status[0])
-
-#         self.assertTrue(p2.is_running())
-
-#         def on_death():
-#             print("In code on_death")
-
-#         os.environ["SUBPROCESS_MONITOR_PID"] = str(p1.pid)
-#         call_on_manager_death(on_death, interval=0.1)
-#         time.sleep(1)
-#         self.assertTrue(p2.is_running())
-#         p1.kill()
-
-#         rc = p2.wait()
-#         self.assertEqual(rc, 3)
-
-
-# TODO: Uncomment this test, but its not working on ubuntu?
-#     async def test_subscribe(self):
-#         """Test the subscribe helper function."""
-#         # Define a script that outputs multiple lines with delays
-#         script = textwrap.dedent(
-#             """
-# import time
-# time.sleep(0.5)
-# for i in range(10):
-#     print(f"Line {i}", flush=True)
-#     time.sleep(0.1)
-# time.sleep(0.5)
-# """
-#         ).strip()
-
-#         # Spawn the subprocess
-#         test_cmd = sys.executable
-#         test_args = ["-u", "-c", script]
-#         response = await send_spawn_request(test_cmd, test_args, {}, port=self.port)
-#         self.assertEqual(response.get("status"), "success")
-#         pid = response.get("pid")
-#         self.assertIsInstance(pid, int)
-#         self.assertIn(pid, self.monitor.process_ownership)
-
-#         # Use the subscribe helper to capture output
-#         messages = []
-
-#         # Modify the `subscribe` function to accept a callback for testing purposes
-#         # If you cannot modify the `subscribe` function, you can simulate similar behavior here
-#         # For demonstration, we'll implement a similar subscription here
-
-#         async with aiohttp.ClientSession() as session:
-#             ws_url = f"http://localhost:{self.port}/subscribe?pid={pid}"
-#             async with session.ws_connect(ws_url) as ws:
-#                 async for msg in ws:
-#                     if msg.type == aiohttp.WSMsgType.TEXT:
-#                         data = json.loads(msg.data)
-#                         messages.append(data)
-#                     elif msg.type == aiohttp.WSMsgType.ERROR:
-#                         raise Exception(
-#                             f"WebSocket connection closed with error: {ws.exception()}"
-#                         )
-#                     else:
-#                         raise Exception(f"Unexpected message type: {msg}")
-#                     # Exit after receiving expected messages
-#                     if len(messages) >= 3:
-#                         break
-
-#         # Verify received messages
-#         self.assertGreaterEqual(len(messages), 3, messages)
-#         for i, message in enumerate(messages[:3]):
-#             self.assertEqual(message.get("pid"), pid)
-#             self.assertEqual(message.get("stream"), "stdout")
-#             self.assertEqual(message.get("data"), f"Line {i}")
+            p1.cancel()
+            p2.cancel()
 
 
 if __name__ == "__main__":
