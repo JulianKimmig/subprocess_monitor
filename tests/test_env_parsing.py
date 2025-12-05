@@ -6,9 +6,21 @@ import subprocess
 import threading
 import os
 
+from subprocess_monitor.subprocess_monitor import SubprocessMonitor
+
 
 class TestEnvironmentParsing(IsolatedAsyncioTestCase):
     """Test cases for environment variable parsing vulnerabilities."""
+
+    async def asyncSetUp(self):
+        """Set up test environment."""
+        self.host = "localhost"
+        self.monitor = SubprocessMonitor(check_interval=0.1, host=self.host)
+        self.port = self.monitor.port
+
+    async def asyncTearDown(self):
+        """Clean up test environment."""
+        await self.monitor.kill_all_subprocesses()
 
     def _run_with_live_output(self, cmd, timeout=10):
         """
@@ -76,6 +88,7 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
             cmd = (
                 [sys.executable, "-m", "subprocess_monitor", "spawn", "--env"]
                 + env_args
+                + ["--host", self.host, "--port", str(self.port)]
                 + ["--", sys.executable, "-c", "print('test')"]
             )
 
