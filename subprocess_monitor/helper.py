@@ -53,6 +53,7 @@ async def send_spawn_request(
     # Validate the request before sending
     safe_validate_spawn_process_request(req)
 
+    logger.debug("Sending spawn request to %s:%s with request: %s", host, port, req)
     async with ClientSession() as session:
         async with session.post(f"http://{host}:{port}/spawn", json=req) as resp:
             raw_response = await resp.json()
