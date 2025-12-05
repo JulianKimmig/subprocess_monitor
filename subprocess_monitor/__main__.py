@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import sys
 from .defaults import DEFAULT_HOST, DEFAULT_PORT
 from subprocess_monitor import (
     run_subprocess_monitor,
@@ -145,7 +146,7 @@ def main():
                     logger.error(
                         f"Invalid environment variable format: '{var}'. Expected KEY=VALUE format."
                     )
-                    return 1
+                    sys.exit(1)
 
                 key, value = var.split("=", 1)
 
@@ -159,7 +160,7 @@ def main():
                         f"Invalid environment variable name: '{key}'."
                         " Names cannot contain spaces or special characters."
                     )
-                    return 1
+                    sys.exit(1)
 
                 env[key] = value
 

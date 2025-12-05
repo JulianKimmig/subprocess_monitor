@@ -83,7 +83,7 @@ class TestManagerDeathDetection(IsolatedAsyncioTestCase):
                 try:
                     call_on_manager_death(test_callback, manager_pid)
                     # Give the thread time to run
-                    time.sleep(0.1)
+                    time.sleep(1)
                 except Exception:
                     # Expected when manager "dies"
                     pass

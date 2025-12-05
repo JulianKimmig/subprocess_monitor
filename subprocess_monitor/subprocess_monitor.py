@@ -597,6 +597,9 @@ class SubprocessMonitor:
                                 stream.read(), timeout=0.1
                             )
                             if remaining_data:
+                                self.logger.debug(
+                                    f"last lines of {pid} {stream_name}: {remaining_data.decode().rstrip()}"
+                                )
                                 message = json.dumps(
                                     StreamingLineOutput(
                                         stream=stream_name,
@@ -666,6 +669,10 @@ class SubprocessMonitor:
                     pid,
                     process.returncode,
                 )
+                # self.logger.debug(
+                # f"last lines of {pid} stdout: "
+                # f"{(await process.stdout.read())[-200:]},stderr: {(await process.stderr.read())[-200:]}"
+                # )
                 await self.stop_subprocess(process, pid)
 
             except Exception as e:
