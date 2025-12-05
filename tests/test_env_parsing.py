@@ -3,11 +3,61 @@ import unittest
 from unittest import IsolatedAsyncioTestCase
 import sys
 import subprocess
+import threading
 import os
 
 
 class TestEnvironmentParsing(IsolatedAsyncioTestCase):
     """Test cases for environment variable parsing vulnerabilities."""
+
+    def _run_with_live_output(self, cmd, timeout=10):
+        """
+        Run a command while continuously printing stdout/stderr so the test log shows
+        live output. Returns a CompletedProcess-like object for assertions.
+        """
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _stream(pipe, collector, sink):
+            for line in iter(pipe.readline, ""):
+                collector.append(line)
+                sink.write(line)
+                sink.flush()
+
+        threads = [
+            threading.Thread(
+                target=_stream,
+                args=(process.stdout, stdout_lines, sys.stdout),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_stream,
+                args=(process.stderr, stderr_lines, sys.stderr),
+                daemon=True,
+            ),
+        ]
+        for t in threads:
+            t.start()
+
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise
+        finally:
+            for t in threads:
+                t.join(timeout=1)
+
+        return subprocess.CompletedProcess(
+            cmd, process.returncode, "".join(stdout_lines), "".join(stderr_lines)
+        )
 
     def test_cli_env_parsing_without_equals(self):
         """Test that environment variables without '=' cause proper error."""
@@ -30,7 +80,7 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
             )
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                result = self._run_with_live_output(cmd, timeout=10)
 
                 # Check if it failed for invalid formats
                 if not env_args or not env_args[0] or "=" not in env_args[0]:
