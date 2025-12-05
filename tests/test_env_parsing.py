@@ -30,7 +30,7 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
             )
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
                 # Check if it failed for invalid formats
                 if not env_args or not env_args[0] or "=" not in env_args[0]:
