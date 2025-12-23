@@ -1,6 +1,6 @@
 [project]
 name = "subprocess-monitor"
-version = "0.3.0"
+version = "0.4.0"
 description = "A service to manage monitor and spawn subprocess"
 authors = [{name = "JulianKimmig", email = "julian.kimmig@gmx.net"}]
 license = {text = "MIT"}
@@ -14,6 +14,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3.3",
+    "pytest-cov>=6.0.0",
     "pre-commit>=4.0.1",
 ]
 

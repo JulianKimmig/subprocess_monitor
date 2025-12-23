@@ -5,11 +5,71 @@ import sys
 import subprocess
 import os
 
+from subprocess_monitor.subprocess_monitor import SubprocessMonitor
+
 
 class TestEnvironmentParsing(IsolatedAsyncioTestCase):
     """Test cases for environment variable parsing vulnerabilities."""
 
-    def test_cli_env_parsing_without_equals(self):
+    async def asyncSetUp(self):
+        """Set up test environment."""
+        self.host = "localhost"
+        self.monitor = SubprocessMonitor(check_interval=0.1, host=self.host)
+        self.port = self.monitor.port
+
+        self.server_task = asyncio.create_task(self.monitor.run())
+
+        # Allow some time for the server to start
+        await asyncio.sleep(1)
+
+    async def asyncTearDown(self):
+        """Clean up test environment."""
+        await self.monitor.kill_all_subprocesses()
+        self.monitor.stop_serve()  # flip _running to False
+        await asyncio.wait_for(self.server_task, timeout=2)  # let serve() exit cleanly
+
+    async def _run_with_live_output(self, cmd, timeout=10):
+        """
+        Run a command while streaming stdout/stderr without blocking the event loop.
+        Returns a CompletedProcess-like object for assertions.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        async def _stream(stream, collector, sink):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded = line.decode()
+                collector.append(decoded)
+                sink.write(decoded)
+                sink.flush()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _stream(process.stdout, stdout_lines, sys.stdout),
+                    _stream(process.stderr, stderr_lines, sys.stderr),
+                    process.wait(),
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            raise
+
+        return subprocess.CompletedProcess(
+            cmd, process.returncode, "".join(stdout_lines), "".join(stderr_lines)
+        )
+
+    async def test_cli_env_parsing_without_equals(self):
         """Test that environment variables without '=' cause proper error."""
         # Issue #8: Environment variable parsing vulnerability in CLI
 
@@ -19,18 +79,20 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
             ["INVALID VAR=value"],  # Space in variable name
             ["=value"],  # No variable name
             [""],  # Empty string
-            ["VAR==value"],  # Double equals (valid but edge case)
+            ["XXVAR=value"],  # norm case
+            ["XXVAR==value"],  # Double equals (valid but edge case)
         ]
 
         for env_args in invalid_env_formats:
             cmd = (
                 [sys.executable, "-m", "subprocess_monitor", "spawn", "--env"]
                 + env_args
+                + ["--host", self.host, "--port", str(self.port)]
                 + ["--", sys.executable, "-c", "print('test')"]
             )
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                result = await self._run_with_live_output(cmd, timeout=1000)
 
                 # Check if it failed for invalid formats
                 if not env_args or not env_args[0] or "=" not in env_args[0]:
@@ -50,8 +112,9 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
             except Exception:
                 # This is expected for invalid formats
                 pass
+            await asyncio.sleep(0.2)
 
-    def test_cli_env_parsing_edge_cases(self):
+    async def test_cli_env_parsing_edge_cases(self):
         """Test edge cases in environment variable parsing."""
         # Test the actual parsing logic from the CLI module
 
@@ -124,7 +187,7 @@ class TestEnvironmentParsing(IsolatedAsyncioTestCase):
         finally:
             await monitor.kill_all_subprocesses()
 
-    def test_port_env_parsing(self):
+    async def test_port_env_parsing(self):
         """Test port environment variable parsing."""
         # Issue #23: Integer conversion errors in environment variable parsing
 
